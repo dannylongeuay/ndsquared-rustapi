@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: rustapi
+  labels:
+    app.kubernetes.io/name: rustapi
+    app.kubernetes.io/instance: rustapi
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5000
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app.kubernetes.io/name: rustapi
+    app.kubernetes.io/instance: rustapi

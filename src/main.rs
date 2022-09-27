@@ -51,6 +51,15 @@ fn handle_end(_gs: Json<battlesnake::GameState>) -> Status {
     Status::Ok
 }
 
+/// # Ping
+///
+/// Returns a pong.
+#[openapi(tag = "Health")]
+#[get("/ping")]
+fn handle_ping() -> &'static str {
+    "pong"
+}
+
 #[launch]
 fn launch() -> _ {
     if env::var("RUST_LOG").is_err() {
@@ -61,7 +70,13 @@ fn launch() -> _ {
     rocket::build()
         .mount(
             "/",
-            openapi_get_routes![handle_index, handle_start, handle_move, handle_end],
+            openapi_get_routes![
+                handle_index,
+                handle_start,
+                handle_move,
+                handle_end,
+                handle_ping
+            ],
         )
         .mount(
             "/docs",
