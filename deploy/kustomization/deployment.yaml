@@ -27,6 +27,7 @@ spec:
               - ALL
             readOnlyRootFilesystem: true
             runAsNonRoot: true
+            runAsUser: 10001
           image: "dannylongeuay/ndsq-rustapi:latest"
           imagePullPolicy: Always
           ports:

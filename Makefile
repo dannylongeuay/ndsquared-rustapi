@@ -20,12 +20,16 @@ build: asdf-bootstrap ## Build the rust binary
 play-local: ## Play a versus game locally against self
 	battlesnake play --name local_snake_1 --url "http://localhost:8000" --name local_snake_2 --url "http://localhost:8000" -v
 
+.PHONY: play-local-cluster
+play-local: ## Play a versus game locally with the cluster version
+	battlesnake play --name cluster_snake_1 --url "http://rustapi.localhost:8000" --name cluster_snake_2 --url "http://rustapi.localhost:8000" -v
+
 .PHONY: play-local-solo
 play-local-solo: ## Play a solo game locally
 	battlesnake play --name solo_snake --url "http://localhost:8000" -g solo -v
 
 .PHONY: play-live
-play-live: ## Play a versus game against live version
+play-live: ## Play a versus game against the live version
 	battlesnake play --name live_snake --url "http://rustapi.ndsquared.net" --name local_snake --url "http://localhost:8000" -v
 
 .PHONY: play-live-solo
