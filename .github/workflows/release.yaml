@@ -19,6 +19,7 @@ jobs:
       - uses: go-semantic-release/action@v1
         id: gsr_action
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           dry: true
   update-files:
     runs-on: ubuntu-latest
@@ -27,7 +28,7 @@ jobs:
       - name: Find and Replace Cargo
         uses: jacobtomlinson/gha-find-replace@v2
         with:
-          find: 'version = "\d+\.\d+\.\d+"'
+          find: '^version = "\d+\.\d+\.\d+"'
           replace: 'version = "${{needs.dry-release.outputs.version}}"'
           include: "Cargo.toml"
       - name: Find and Replace Kustomization
