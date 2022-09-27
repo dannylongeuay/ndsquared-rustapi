@@ -1,0 +1,15 @@
+name: Find and Replace
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Find and Replace
+        uses: jacobtomlinson/gha-find-replace@v2
+        with:
+          find: 'version = "\\d+\\.\\d+\.\d+"'
+          replace: '"version = "1.2.3"'
+          include: "**Cargo.toml"
+      - name: Add and Commit Changes
+        uses: EndBug/add-and-commit@v9

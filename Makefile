@@ -21,7 +21,7 @@ play-local: ## Play a versus game locally against self
 	battlesnake play --name local_snake_1 --url "http://localhost:8000" --name local_snake_2 --url "http://localhost:8000" -v
 
 .PHONY: play-local-cluster
-play-local: ## Play a versus game locally with the cluster version
+play-local-cluster: ## Play a versus game locally with the cluster version
 	battlesnake play --name cluster_snake_1 --url "http://rustapi.localhost:8000" --name cluster_snake_2 --url "http://rustapi.localhost:8000" -v
 
 .PHONY: play-local-solo
