@@ -263,7 +263,7 @@ pub fn info() -> Info {
         apiversion: "1".to_owned(),
         author: "DeanRefined".to_owned(),
         customizations,
-        version: "1.2.3".to_owned(),
+        version: "".to_owned(),
     }
 }
 
