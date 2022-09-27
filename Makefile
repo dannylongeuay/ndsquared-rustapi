@@ -11,3 +11,7 @@ asdf-bootstrap: ## Bootstrap tooling dependencies
 .PHONY: run
 run: asdf-bootstrap ## Run the rust binary
 	cargo run
+
+.PHONY: build
+build: asdf-bootstrap ## Build the rust binary
+	cargo build
