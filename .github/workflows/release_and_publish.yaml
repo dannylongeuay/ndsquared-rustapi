@@ -8,53 +8,52 @@ on:
       - "Dockerfile"
       - "Cargo.toml"
 jobs:
-  get-tag:
-    name: Get Tag Version
+  info:
+    name: Get Next Tag and Version Info
     runs-on: ubuntu-latest
     outputs:
-      tag: ${{steps.tag_step.outputs.new_tag}}
-      version: ${{steps.tag_step.outputs.new_version}}
-      log: ${{steps.tag_step.outputs.changelog}}
+      tag: ${{steps.tag_info.outputs.new_tag}}
+      version: ${{steps.tag_info.outputs.new_version}}
+      log: ${{steps.tag_info.outputs.changelog}}
     steps:
       - uses: actions/checkout@v3
       - uses: mathieudutour/github-tag-action@v6.0
-        id: tag_step
+        id: tag_info
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           dry_run: true
-  update-and-tag:
-    name: Update Files and Push Tag
+  update:
+    name: Update Files with New Version and Push Tag
     runs-on: ubuntu-latest
-    needs: get-tag
-    if: needs.get-tag.outputs.version != ''
+    needs: info
     steps:
       - uses: actions/checkout@v3
       - name: Find and Replace Cargo
         uses: jacobtomlinson/gha-find-replace@v2
         with:
           find: '(?m)^version = "\d+\.\d+\.\d+"$'
-          replace: 'version = "${{needs.get-tag.outputs.version}}"'
+          replace: 'version = "${{needs.info.outputs.version}}"'
           include: "Cargo.toml"
       - name: Find and Replace Kustomization
         uses: jacobtomlinson/gha-find-replace@v2
         with:
           find: 'newTag: \d+\.\d+\.\d+'
-          replace: 'newTag: ${{needs.get-tag.outputs.version}}'
+          replace: 'newTag: ${{needs.info.outputs.version}}'
           include: "deploy/kustomization/kustomization.yaml"
       - name: Find and Replace Battlesnake
         uses: jacobtomlinson/gha-find-replace@v2
         with:
           find: 'version: "\d+\.\d+\.\d+"'
-          replace: 'version: "${{needs.get-tag.outputs.version}}"'
+          replace: 'version: "${{needs.info.outputs.version}}"'
           include: "src/battlesnake.rs"
       - name: Add and Commit Changes
         uses: EndBug/add-and-commit@v9
         with:
-          tag: ${{needs.get-tag.outputs.tag}}
+          tag: ${{needs.info.outputs.tag}}
   release:
-    name: Release
+    name: Publish Release
     runs-on: ubuntu-latest
-    needs: [get-tag, update-and-tag]
+    needs: [info, update]
     steps:
       - uses: actions/checkout@v3
         with:
@@ -62,13 +61,13 @@ jobs:
       - name: Create a GitHub release
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{needs.get-tag.outputs.tag}}
-          name: ndsq-rustapi - ${{needs.get-tag.outputs.version}}
-          body: ${{needs.get-tag.outputs.log}}
+          tag: ${{needs.info.outputs.tag}}
+          name: ndsq-rustapi - ${{needs.info.outputs.version}}
+          body: ${{needs.info.outputs.log}}
   publish:
-    name: Publish image to Docker Hub
+    name: Publish Image to Docker Hub
     runs-on: ubuntu-latest
-    needs: [get-tag, release]
+    needs: [info, release]
     steps:
       - uses: actions/checkout@v3
         with:
@@ -79,4 +78,4 @@ jobs:
           name: dannylongeuay/ndsq-rustapi
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
-          tags: "latest,${{needs.get-tag.outputs.version}}"
+          tags: "latest,${{needs.info.outputs.version}}"
