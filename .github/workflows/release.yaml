@@ -3,10 +3,10 @@ on:
   push:
     branches:
       - main
-    # paths:
-    #   - "src/**"
-    #   - "Dockerfile"
-    #   - "Cargo.toml"
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - "Cargo.toml"
 jobs:
   get-tag:
     name: Get Tag Version
@@ -63,20 +63,20 @@ jobs:
         uses: ncipollo/release-action@v1
         with:
           tag: ${{needs.get-tag.outputs.tag}}
-          name: ${{needs.get-tag.outputs.version}}
+          name: ndsq-rustapi - ${{needs.get-tag.outputs.version}}
           body: ${{needs.get-tag.outputs.log}}
-  # publish:
-  #   name: Publish image to Docker Hub
-  #   runs-on: ubuntu-latest
-  #   needs: release
-  #   steps:
-  #     - uses: actions/checkout@v3
-  #       with:
-  #         ref: main
-  #     - name: Publish to Registry
-  #       uses: elgohr/Publish-Docker-Github-Action@master
-  #       with:
-  #         name: dannylongeuay/ndsq-rustapi
-  #         username: ${{ secrets.DOCKER_USERNAME }}
-  #         password: ${{ secrets.DOCKER_PASSWORD }}
-  #         tags: "latest,${{needs.release.outputs.version}}"
+  publish:
+    name: Publish image to Docker Hub
+    runs-on: ubuntu-latest
+    needs: [get-tag, release]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: main
+      - name: Publish to Registry
+        uses: elgohr/Publish-Docker-Github-Action@master
+        with:
+          name: dannylongeuay/ndsq-rustapi
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          tags: "latest,${{needs.get-tag.outputs.version}}"

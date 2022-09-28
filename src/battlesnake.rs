@@ -285,7 +285,7 @@ pub fn make_move(gs: GameState) -> MoveResponse {
 
     let mr = MoveResponse {
         direction: chosen_direction,
-        shout: format!("Moving {:?}!", chosen_direction),
+        shout: format!("MOVING {:?}!", chosen_direction),
     };
 
     info!("{:?}", mr);
