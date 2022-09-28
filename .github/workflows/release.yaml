@@ -9,10 +9,12 @@ on:
     #   - "Cargo.toml"
 jobs:
   get-tag:
-    name: Get Tag
+    name: Get Tag Version
     runs-on: ubuntu-latest
     outputs:
+      tag: ${{steps.tag_step.outputs.new_tag}}
       version: ${{steps.tag_step.outputs.new_version}}
+      log: ${{steps.tag_step.outputs.changelog}}
     steps:
       - uses: actions/checkout@v3
       - uses: mathieudutour/github-tag-action@v6.0
@@ -48,7 +50,7 @@ jobs:
       - name: Add and Commit Changes
         uses: EndBug/add-and-commit@v9
         with:
-          tag: ${{needs.get-tag.outputs.version}}
+          tag: ${{needs.get-tag.outputs.tag}}
   release:
     name: Release
     runs-on: ubuntu-latest
@@ -60,8 +62,9 @@ jobs:
       - name: Create a GitHub release
         uses: ncipollo/release-action@v1
         with:
-          tag: ${{needs.get-tag.outputs.version}}
-          name: Release ${{needs.get-tag.outputs.version}}
+          tag: ${{needs.get-tag.outputs.tag}}
+          name: ${{needs.get-tag.outputs.version}}
+          body: ${{needs.get-tag.outputs.log}}
   # publish:
   #   name: Publish image to Docker Hub
   #   runs-on: ubuntu-latest
