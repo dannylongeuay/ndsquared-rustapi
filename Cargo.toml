@@ -1,6 +1,6 @@
 [package]
 name = "ndsquared-rustapi"
-version = "1.4.0"
+version = ""
 edition = "2021"
 
 [dependencies]
