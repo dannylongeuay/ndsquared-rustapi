@@ -54,6 +54,8 @@ jobs:
       version: ${{steps.gsr_action.outputs.version}}
     steps:
       - uses: actions/checkout@v3
+        with:
+          ref: main
       - uses: go-semantic-release/action@v1
         id: gsr_action
         with:
@@ -64,6 +66,8 @@ jobs:
     needs: dry-release
     steps:
       - uses: actions/checkout@v3
+        with:
+          ref: main
       - name: Publish to Registry
         uses: elgohr/Publish-Docker-Github-Action@master
         with:

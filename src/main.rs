@@ -32,7 +32,7 @@ fn handle_start(_gs: Json<battlesnake::GameState>) -> Status {
 
 /// # Move
 ///
-/// This request will be sent for every turn of the game.
+/// This request will be sent for every turn of the game. Use the information provided to determine how your Battlesnake will move on that turn, either up, down, left, or right.
 #[openapi(tag = "Battlesnake")]
 #[post("/move", format = "json", data = "<gs>")]
 fn handle_move(gs: Json<battlesnake::GameState>) -> Json<battlesnake::MoveResponse> {
