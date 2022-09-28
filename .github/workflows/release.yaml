@@ -55,10 +55,18 @@ jobs:
       version: ${{steps.tag_step.outputs.new_version}}
     steps:
       - uses: actions/checkout@v3
+        with:
+          ref: main
       - uses: mathieudutour/github-tag-action@v6.0
         id: tag_step
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create a GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tag_step.outputs.new_tag }}
+          name: Release ${{ steps.tag_step.outputs.new_tag }}
+          body: ${{ steps.tag_step.outputs.changelog }}
   # publish:
   #   name: Publish image to Docker Hub
   #   runs-on: ubuntu-latest
