@@ -20,6 +20,10 @@ build: asdf-bootstrap ## Build the rust binary
 play-local: ## Play a versus game locally against self
 	battlesnake play --name local_snake_1 --url "http://localhost:8000" --name local_snake_2 --url "http://localhost:8000" -v
 
+.PHONY: play-local-browser
+play-local-browser: ## Play a versus game locally against self, then open the replay in the browser
+	battlesnake play --name local_snake_1 --url "http://localhost:8000" --name local_snake_2 --url "http://localhost:8000" --browser
+
 .PHONY: play-local-cluster
 play-local-cluster: ## Play a versus game locally with the cluster version
 	battlesnake play --name cluster_snake_1 --url "http://rustapi.localhost:8000" --name cluster_snake_2 --url "http://rustapi.localhost:8000" -v
@@ -28,9 +32,17 @@ play-local-cluster: ## Play a versus game locally with the cluster version
 play-local-solo: ## Play a solo game locally
 	battlesnake play --name solo_snake --url "http://localhost:8000" -g solo -v
 
+.PHONY: play-local-solo-browser
+play-local-solo-browser: ## Play a solo game locally, then open the replay in the browser
+	battlesnake play --name solo_snake --url "http://localhost:8000" -g solo --browser
+
 .PHONY: play-live
 play-live: ## Play a versus game against the live version
 	battlesnake play --name live_snake --url "http://rustapi.ndsquared.net" --name local_snake --url "http://localhost:8000" -v
+
+.PHONY: play-live-browser
+play-live-browser: ## Play a versus game against the live version, then open the replay in the browser
+	battlesnake play --name live_snake --url "http://rustapi.ndsquared.net" --name local_snake --url "http://localhost:8000" --browser
 
 .PHONY: play-live-solo
 play-live-solo: ## Play a solo game with the live battlesnake version
