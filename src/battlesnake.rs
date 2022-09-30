@@ -17,7 +17,7 @@ pub struct Customizations {
     tail: String,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Info {
     /// Version of the Battlesnake API implemented by this Battlesnake. Currently only API version 1 is valid. Example: "1"
     apiversion: String,
@@ -30,7 +30,7 @@ pub struct Info {
     version: String,
 }
 
-#[derive(Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum Source {
     #[default]
@@ -44,7 +44,7 @@ enum Source {
     Custom,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum GameMode {
     Standard,
@@ -55,7 +55,7 @@ enum GameMode {
     Wrapped,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum GameMap {
     Standard,
@@ -83,14 +83,14 @@ enum Direction {
     Right,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RoyaleSettings {
     /// The number of turns between generating new hazards (shrinking the safe board space).
     shrink_every_n_turns: u32,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SquadSettings {
     /// Allow members of the same squad to move over each other without dying.
@@ -103,7 +103,7 @@ pub struct SquadSettings {
     shared_length: bool,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RulesetSettings {
     /// Percentage chance of spawning a new food every round.
@@ -118,7 +118,7 @@ pub struct RulesetSettings {
     squad: SquadSettings,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Ruleset {
     /// Name of the ruleset being used to run this game.
     name: GameMode,
@@ -128,7 +128,7 @@ pub struct Ruleset {
     settings: RulesetSettings,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Game {
     /// A unique identifier for this Game. Example: "totally-unique-game-id"
     id: String,
@@ -200,7 +200,7 @@ impl Coord {
     // }
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Board {
     /// The number of rows in the y-axis of the game board. Example: 11
     height: i32,
@@ -327,7 +327,6 @@ impl Board {
         costs.insert(start.clone(), 0);
         while let Some(CoordItem { coord, cost }) = nodes.pop() {
             if coord == *end {
-                info!("{:?}", costs);
                 return Some(cost);
             }
             for adjacent_coord in coord.new_adjacent_coords() {
@@ -349,7 +348,6 @@ impl Board {
                 }
             }
         }
-        info!("{:?}", costs);
         None
     }
     fn compute_controlled_squares(&self, exclusions: &HashSet<Coord>) -> ControlledSquares {
@@ -452,7 +450,7 @@ impl Battlesnake {
     }
 }
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct GameState {
     /// Game Object describing the game being played.
     game: Game,
@@ -474,20 +472,22 @@ pub struct MoveResponse {
 }
 
 pub fn info() -> Info {
-    info!("INFO");
-
     let customizations = Customizations {
         color: "#00ccff".to_owned(),
         head: "default".to_owned(),
         tail: "default".to_owned(),
     };
 
-    Info {
+    let result = Info {
         apiversion: "1".to_owned(),
         author: "DeanRefined".to_owned(),
         customizations,
         version: "1.7.1".to_owned(),
-    }
+    };
+
+    info!("{:?}", result);
+
+    result
 }
 
 pub fn make_move(mut gs: GameState) -> MoveResponse {
@@ -601,10 +601,10 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
     mr
 }
 
-pub fn start() {
-    info!("START");
+pub fn start(gs: GameState) {
+    info!("START: {:?}", gs);
 }
 
-pub fn end() {
-    info!("END");
+pub fn end(gs: GameState) {
+    info!("END: {:?}", gs);
 }

@@ -14,7 +14,6 @@ mod battlesnake;
 #[openapi(tag = "Battlesnake")]
 #[get("/")]
 fn handle_index() -> Json<battlesnake::Info> {
-    info!("HANDLE INDEX");
     Json(battlesnake::info())
 }
 
@@ -22,10 +21,9 @@ fn handle_index() -> Json<battlesnake::Info> {
 ///
 /// This request is received when the Battlesnake has been entered into a new game.
 #[openapi(tag = "Battlesnake")]
-#[post("/start", format = "json", data = "<_gs>")]
-fn handle_start(_gs: Json<battlesnake::GameState>) -> Status {
-    info!("HANDLE START");
-    battlesnake::start();
+#[post("/start", format = "json", data = "<gs>")]
+fn handle_start(gs: Json<battlesnake::GameState>) -> Status {
+    battlesnake::start(gs.into_inner());
     Status::Ok
 }
 
@@ -35,7 +33,6 @@ fn handle_start(_gs: Json<battlesnake::GameState>) -> Status {
 #[openapi(tag = "Battlesnake")]
 #[post("/move", format = "json", data = "<gs>")]
 fn handle_move(gs: Json<battlesnake::GameState>) -> Json<battlesnake::MoveResponse> {
-    info!("HANDLE MOVE");
     Json(battlesnake::make_move(gs.into_inner()))
 }
 
@@ -43,10 +40,9 @@ fn handle_move(gs: Json<battlesnake::GameState>) -> Json<battlesnake::MoveRespon
 ///
 /// Your Battlesnake will receive this request whenever a game it was playing has ended.
 #[openapi(tag = "Battlesnake")]
-#[post("/end", format = "json", data = "<_gs>")]
-fn handle_end(_gs: Json<battlesnake::GameState>) -> Status {
-    info!("HANDLE END");
-    battlesnake::end();
+#[post("/end", format = "json", data = "<gs>")]
+fn handle_end(gs: Json<battlesnake::GameState>) -> Status {
+    battlesnake::end(gs.into_inner());
     Status::Ok
 }
 
@@ -62,7 +58,7 @@ fn handle_ping() -> &'static str {
 #[launch]
 fn launch() -> _ {
     if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "info");
+        env::set_var("RUST_LOG", "warn,ndsquared_rustapi::battlesnake=info/.*");
     }
     env_logger::init();
     info!("LAUNCH");
