@@ -40,6 +40,7 @@ enum Source {
     League,
     Arena,
     Challenge,
+    Ladder,
     Custom,
 }
 
