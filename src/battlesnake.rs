@@ -217,11 +217,16 @@ pub struct Board {
     obstacles: HashSet<Coord>,
     #[serde(skip)]
     safe_tails: HashSet<Coord>,
+    #[serde(skip)]
+    safe_adjacent_heads: HashSet<Coord>,
+    #[serde(skip)]
+    dangerous_adjacent_heads: HashSet<Coord>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum StrategyName {
     Random,
+    Starving,
     Survival,
     FollowMySelf,
     FollowAFriend,
@@ -232,7 +237,7 @@ enum StrategyName {
 pub struct Strategy {
     name: StrategyName,
     direction: Direction,
-    cost: u32,
+    cost: i32,
 }
 
 impl Ord for Strategy {
@@ -279,9 +284,10 @@ impl Board {
     fn is_valid_and_safe_at(&self, coord: &Coord) -> bool {
         self.is_valid_at(coord) && self.is_safe_at(coord)
     }
-    fn compute_obstacles(&mut self) {
+    fn compute_obstacles(&mut self, you: &Battlesnake) {
         let mut obstacles: HashSet<Coord> = HashSet::new();
         for snake in &self.snakes {
+            // Compute for all snakes
             for (i, body) in snake.body.iter().enumerate() {
                 if i == snake.body.len() - 1 {
                     if !snake.just_ate() {
@@ -292,6 +298,16 @@ impl Board {
                     }
                 }
                 obstacles.insert(body.clone());
+            }
+            // Compute for opponents only
+            if snake.id == you.id {
+                continue;
+            }
+            let adjacent_head_coords = snake.head.new_adjacent_coords();
+            if you.length <= snake.length {
+                self.dangerous_adjacent_heads.extend(adjacent_head_coords);
+            } else {
+                self.safe_adjacent_heads.extend(adjacent_head_coords);
             }
         }
         obstacles.extend(self.hazards.clone());
@@ -315,7 +331,7 @@ impl Board {
         }
         random_direction
     }
-    fn astar(&self, start: &Coord, end: &Coord) -> Option<u32> {
+    fn shortest_distance(&self, start: &Coord, end: &Coord) -> Option<u32> {
         let mut nodes = BinaryHeap::new();
         let mut visited: HashSet<Coord> = HashSet::new();
         let mut costs: HashMap<Coord, u32> = HashMap::new();
@@ -336,7 +352,7 @@ impl Board {
                 if visited.contains(&adjacent_coord) {
                     continue;
                 }
-                let new_cost = costs[&coord] + 1;
+                let new_cost = costs[&coord] + 5;
                 let adjacent_cost = costs.get(&adjacent_coord);
                 if adjacent_cost == None || new_cost < *adjacent_cost.unwrap() {
                     costs.insert(adjacent_coord.clone(), new_cost);
@@ -349,6 +365,17 @@ impl Board {
             }
         }
         None
+    }
+    fn closest_food_distance(&self, coord: &Coord) -> Option<u32> {
+        let mut closest_distance: Option<u32> = None;
+        for food in &self.food {
+            if let Some(food_distance) = self.shortest_distance(coord, &food) {
+                if closest_distance == None || food_distance < closest_distance.unwrap() {
+                    closest_distance = Some(food_distance);
+                }
+            }
+        }
+        closest_distance
     }
     fn compute_controlled_squares(&self, exclusions: &HashSet<Coord>) -> ControlledSquares {
         let mut squares: HashMap<String, HashMap<Coord, Square>> = HashMap::new();
@@ -473,9 +500,9 @@ pub struct MoveResponse {
 
 pub fn info() -> Info {
     let customizations = Customizations {
-        color: "#00ccff".to_owned(),
-        head: "default".to_owned(),
-        tail: "default".to_owned(),
+        color: "#6434eb".to_owned(),
+        head: "pixel".to_owned(),
+        tail: "pixel".to_owned(),
     };
 
     let result = Info {
@@ -496,7 +523,7 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
         gs.turn, gs.you.name
     );
 
-    gs.board.compute_obstacles();
+    gs.board.compute_obstacles(&gs.you);
 
     let mut strategies = BinaryHeap::new();
 
@@ -512,20 +539,29 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
     for direction in Direction::iter() {
         let mut exclusions: HashSet<Coord> = HashSet::new();
         let adjacent_coord = gs.you.head.new_adjacent_coord(&direction);
-        // TODO: handle head on collisions
+        let mut cost_mod: i32 = 0;
         if !gs.board.is_valid_and_safe_at(&adjacent_coord) {
             info!("Direction {:?} is not safe", direction);
             continue;
         }
+        // Handle head collisions
+        if gs.board.dangerous_adjacent_heads.contains(&adjacent_coord) {
+            info!("Direction {:?} is dangerous", direction);
+            cost_mod += 25;
+        } else if gs.board.safe_adjacent_heads.contains(&adjacent_coord) {
+            info!("Direction {:?} is appetizing", direction);
+            cost_mod -= 25;
+        }
+        // Follow our own tail when no food is in our controlled area and we aren't hungry yet
         if let Some(my_tail_distance) = gs
             .board
-            .astar(&adjacent_coord, &gs.you.body.last().unwrap())
+            .shortest_distance(&adjacent_coord, &gs.you.body.last().unwrap())
         {
             if my_tail_distance > 1 || !gs.board.food.contains(&adjacent_coord) {
                 strategies.push(Strategy {
                     name: StrategyName::FollowMySelf,
                     direction,
-                    cost: 500 + my_tail_distance,
+                    cost: 500 + my_tail_distance as i32 + cost_mod,
                 });
             }
         }
@@ -552,16 +588,28 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
             }
         };
         let squares = gs.board.compute_controlled_squares(&exclusions);
-        let squares_count = squares.squares[&gs.you.id].len();
+        let squares_count = squares.squares[&gs.you.id].len() as i32;
+        // Eat any food when we get hungry enough, even if the food is not in our controlled area
+        if gs.you.health <= 33 {
+            if let Some(starving_food_distance) = gs.board.closest_food_distance(&adjacent_coord) {
+                strategies.push(Strategy {
+                    name: StrategyName::Starving,
+                    direction,
+                    cost: 250 - squares_count + starving_food_distance as i32 + cost_mod,
+                });
+            }
+        }
         info!(
             "Direction {:?} controls {:?} square(s)",
             direction, squares_count
         );
+        // Move towards an area with the most squares available if we can't eat or follow our tail
         strategies.push(Strategy {
             name: StrategyName::Survival,
             direction,
-            cost: 1000 - squares_count as u32,
+            cost: 1000 - squares_count + cost_mod,
         });
+        // Eat food in my controlled area
         if let Some(direction_food_distance) = squares.closest_food_distance[&gs.you.id] {
             if squares_count as u32 > gs.you.length + 1
                 && direction_food_distance < closest_food_distance
@@ -569,17 +617,18 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
                 strategies.push(Strategy {
                     name: StrategyName::NomNom,
                     direction,
-                    cost: 1 + direction_food_distance,
+                    cost: 1 + direction_food_distance as i32,
                 });
                 closest_food_distance = direction_food_distance;
             }
         }
+        // Follow another snakes tail as a last resort
         if let Some(direction_tail_distance) = squares.closest_tail_distance[&gs.you.id] {
             if direction_tail_distance < closest_tail_distance {
                 strategies.push(Strategy {
                     name: StrategyName::FollowAFriend,
                     direction,
-                    cost: 5000 + direction_tail_distance,
+                    cost: 5000 + direction_tail_distance as i32 + cost_mod,
                 });
                 closest_tail_distance = direction_tail_distance;
             }
