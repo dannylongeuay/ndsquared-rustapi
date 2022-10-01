@@ -7,7 +7,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Customizations {
     /// Hex color code used to display this Battlesnake. Must start with "#" and be 7 characters long. Example: "#888888"
     color: String,
@@ -30,7 +30,7 @@ pub struct Info {
     version: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "snake_case")]
 enum Source {
     #[default]
@@ -44,7 +44,7 @@ enum Source {
     Custom,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, PartialEq, Clone)]
 #[serde(rename_all = "snake_case")]
 enum GameMode {
     Standard,
@@ -55,7 +55,7 @@ enum GameMode {
     Wrapped,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "snake_case")]
 enum GameMap {
     Standard,
@@ -73,6 +73,7 @@ enum GameMap {
     HzGrowBox,
     HzExpandBox,
     HzExpandScatter,
+    HzCastleWall,
 }
 
 #[derive(Debug, EnumIter, Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,14 +85,14 @@ enum Direction {
     Right,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RoyaleSettings {
     /// The number of turns between generating new hazards (shrinking the safe board space).
     shrink_every_n_turns: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SquadSettings {
     /// Allow members of the same squad to move over each other without dying.
@@ -104,7 +105,7 @@ pub struct SquadSettings {
     shared_length: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RulesetSettings {
     /// Percentage chance of spawning a new food every round.
@@ -119,7 +120,7 @@ pub struct RulesetSettings {
     squad: SquadSettings,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Ruleset {
     /// Name of the ruleset being used to run this game.
     name: GameMode,
@@ -129,7 +130,7 @@ pub struct Ruleset {
     settings: RulesetSettings,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Game {
     /// A unique identifier for this Game. Example: "totally-unique-game-id"
     id: String,
@@ -168,40 +169,7 @@ impl PartialOrd for CoordItem {
     }
 }
 
-impl Coord {
-    fn new_adjacent_coord(&self, dir: &Direction) -> Coord {
-        let mut x: i32 = self.x;
-        let mut y: i32 = self.y;
-        match dir {
-            Direction::Up => y += 1,
-            Direction::Down => y -= 1,
-            Direction::Left => x -= 1,
-            Direction::Right => x += 1,
-        };
-        Coord { x, y }
-    }
-    fn new_adjacent_coords(&self) -> Vec<Coord> {
-        let mut adjacent_coords: Vec<Coord> = Vec::new();
-        for direction in Direction::iter() {
-            adjacent_coords.push(self.new_adjacent_coord(&direction));
-        }
-        adjacent_coords
-    }
-    // fn direction_to(&self, other: &Coord) -> Direction {
-    //     match (self.x - other.x, self.y - other.y) {
-    //         (0, -1) => Direction::Up,
-    //         (0, 1) => Direction::Down,
-    //         (-1, 0) => Direction::Right,
-    //         (1, 0) => Direction::Left,
-    //         _ => {
-    //             error!("could not get direction from {:?} to {:?}", self, other);
-    //             Direction::Down
-    //         }
-    //     }
-    // }
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Board {
     /// The number of rows in the y-axis of the game board. Example: 11
     height: i32,
@@ -272,180 +240,7 @@ pub struct ControlledSquares {
     closest_tail_distance: HashMap<String, Option<u32>>,
 }
 
-impl Board {
-    fn in_bounds(&self, coord: &Coord) -> bool {
-        return coord.x >= 0 && coord.y >= 0 && coord.x < self.width && coord.y < self.height;
-    }
-    fn is_valid_at(&self, coord: &Coord) -> bool {
-        self.in_bounds(coord)
-    }
-    fn is_safe_at(&self, coord: &Coord) -> bool {
-        !self.obstacles.contains(coord)
-    }
-    fn is_valid_and_safe_at(&self, coord: &Coord) -> bool {
-        self.is_valid_at(coord) && self.is_safe_at(coord)
-    }
-    fn compute_obstacles(&mut self, you: &Battlesnake) {
-        let mut obstacles: HashSet<Coord> = HashSet::new();
-        for snake in &self.snakes {
-            // Compute for all snakes
-            for (i, body) in snake.body.iter().enumerate() {
-                if i == snake.body.len() - 1 {
-                    if !snake.just_ate() {
-                        self.safe_tails.insert(body.clone());
-                        continue;
-                    } else {
-                        debug!("{:?} just ate", snake);
-                    }
-                }
-                obstacles.insert(body.clone());
-            }
-            // Compute for opponents only
-            if snake.id == you.id {
-                continue;
-            }
-            let adjacent_head_coords = snake.head.new_adjacent_coords();
-            if you.length <= snake.length {
-                self.dangerous_adjacent_heads.extend(adjacent_head_coords);
-            } else {
-                self.safe_adjacent_heads.extend(adjacent_head_coords);
-            }
-        }
-        obstacles.extend(self.hazards.clone());
-        self.obstacles = obstacles;
-    }
-    fn get_random_valid_direction(&self, coord: &Coord) -> Direction {
-        let mut valid_directions: Vec<Direction> = Vec::new();
-
-        for direction in Direction::iter() {
-            let adjacent_coord = coord.new_adjacent_coord(&direction);
-            if self.is_valid_and_safe_at(&adjacent_coord) {
-                valid_directions.push(direction);
-            }
-        }
-
-        // Default direction if no valid direction is found
-        let mut random_direction: Direction = Direction::Down;
-
-        if valid_directions.len() > 0 {
-            random_direction = *valid_directions.choose(&mut rand::thread_rng()).unwrap();
-        }
-        random_direction
-    }
-    fn shortest_distance(&self, start: &Coord, end: &Coord) -> Option<u32> {
-        let mut nodes = BinaryHeap::new();
-        let mut visited: HashSet<Coord> = HashSet::new();
-        let mut costs: HashMap<Coord, u32> = HashMap::new();
-        nodes.push(CoordItem {
-            coord: start.clone(),
-            cost: 0,
-        });
-        visited.insert(start.clone());
-        costs.insert(start.clone(), 0);
-        while let Some(CoordItem { coord, cost }) = nodes.pop() {
-            if coord == *end {
-                return Some(cost);
-            }
-            for adjacent_coord in coord.new_adjacent_coords() {
-                if !self.is_valid_and_safe_at(&adjacent_coord) {
-                    continue;
-                }
-                if visited.contains(&adjacent_coord) {
-                    continue;
-                }
-                let new_cost = costs[&coord] + 5;
-                let adjacent_cost = costs.get(&adjacent_coord);
-                if adjacent_cost == None || new_cost < *adjacent_cost.unwrap() {
-                    costs.insert(adjacent_coord.clone(), new_cost);
-                    visited.insert(adjacent_coord.clone());
-                    nodes.push(CoordItem {
-                        coord: adjacent_coord.clone(),
-                        cost: new_cost,
-                    })
-                }
-            }
-        }
-        None
-    }
-    fn closest_food_distance(&self, coord: &Coord) -> Option<u32> {
-        let mut closest_distance: Option<u32> = None;
-        for food in &self.food {
-            if let Some(food_distance) = self.shortest_distance(coord, &food) {
-                if closest_distance == None || food_distance < closest_distance.unwrap() {
-                    closest_distance = Some(food_distance);
-                }
-            }
-        }
-        closest_distance
-    }
-    fn compute_controlled_squares(&self, exclusions: &HashSet<Coord>) -> ControlledSquares {
-        let mut squares: HashMap<String, HashMap<Coord, Square>> = HashMap::new();
-        let mut nodes: VecDeque<Square> = VecDeque::new();
-        let mut visited: HashSet<Coord> = HashSet::new();
-        visited.extend(exclusions);
-        let mut paths: HashMap<String, HashMap<Coord, Coord>> = HashMap::new();
-        let mut closest_food_distance: HashMap<String, Option<u32>> = HashMap::new();
-        let mut closest_tail_distance: HashMap<String, Option<u32>> = HashMap::new();
-        for snake in &self.snakes {
-            squares.insert(snake.id.clone(), HashMap::new());
-            paths.insert(snake.id.clone(), HashMap::new());
-            closest_food_distance.insert(snake.id.clone(), None);
-            closest_tail_distance.insert(snake.id.clone(), None);
-            let square = Square {
-                owner: snake.id.clone(),
-                coord: snake.head,
-                distance: 0,
-            };
-            nodes.push_back(square.clone());
-            visited.insert(snake.head);
-            squares
-                .get_mut(&snake.id)
-                .unwrap()
-                .insert(snake.head, square.clone());
-        }
-        while !nodes.is_empty() {
-            let current_square = nodes.pop_front().unwrap();
-            for coord in current_square.coord.new_adjacent_coords() {
-                if !visited.contains(&coord) && self.is_valid_and_safe_at(&coord) {
-                    let current_square =
-                        squares[&current_square.owner][&current_square.coord].clone();
-                    let distance = current_square.distance + 1;
-                    let food = self.food.contains(&coord);
-                    let square = Square {
-                        owner: current_square.owner.clone(),
-                        coord,
-                        distance,
-                    };
-                    if closest_food_distance[&current_square.owner] == None && food {
-                        closest_food_distance.insert(current_square.owner.clone(), Some(distance));
-                    }
-                    if closest_tail_distance[&current_square.owner] == None
-                        && self.safe_tails.contains(&coord)
-                    {
-                        closest_tail_distance.insert(current_square.owner.clone(), Some(distance));
-                    }
-                    nodes.push_back(square.clone());
-                    visited.insert(coord);
-                    paths
-                        .get_mut(&current_square.owner)
-                        .unwrap()
-                        .insert(coord, current_square.coord);
-                    squares
-                        .get_mut(&current_square.owner)
-                        .unwrap()
-                        .insert(coord, square.clone());
-                }
-            }
-        }
-        ControlledSquares {
-            squares,
-            closest_food_distance,
-            closest_tail_distance,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Battlesnake {
     /// Unique identifier for this Battlesnake in the context of the current Game. Example: "totally-unique-snake-id"
     id: String,
@@ -478,7 +273,7 @@ impl Battlesnake {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 pub struct GameState {
     /// Game Object describing the game being played.
     game: Game,
@@ -488,6 +283,219 @@ pub struct GameState {
     board: Board,
     /// Battlesnake Object describing your Battlesnake.
     you: Battlesnake,
+}
+
+impl GameState {
+    fn new_adjacent_coord(&self, coord: &Coord, dir: &Direction) -> Coord {
+        let mut x: i32 = coord.x;
+        let mut y: i32 = coord.y;
+        match self.game.ruleset.name {
+            GameMode::Wrapped => {
+                match dir {
+                    Direction::Up => y += 1,
+                    Direction::Down => y -= 1,
+                    Direction::Left => x -= 1,
+                    Direction::Right => x += 1,
+                };
+                x = i32::rem_euclid(x, self.board.width);
+                y = i32::rem_euclid(y, self.board.height);
+            }
+            _ => {
+                match dir {
+                    Direction::Up => y += 1,
+                    Direction::Down => y -= 1,
+                    Direction::Left => x -= 1,
+                    Direction::Right => x += 1,
+                };
+            }
+        }
+        Coord { x, y }
+    }
+    fn new_adjacent_coords(&self, coord: &Coord) -> Vec<Coord> {
+        let mut adjacent_coords: Vec<Coord> = Vec::new();
+        for direction in Direction::iter() {
+            adjacent_coords.push(self.new_adjacent_coord(coord, &direction));
+        }
+        adjacent_coords
+    }
+    fn in_bounds(&self, coord: &Coord) -> bool {
+        return coord.x >= 0
+            && coord.y >= 0
+            && coord.x < self.board.width
+            && coord.y < self.board.height;
+    }
+    fn is_valid_at(&self, coord: &Coord) -> bool {
+        self.in_bounds(coord)
+    }
+    fn is_safe_at(&self, coord: &Coord) -> bool {
+        !self.board.obstacles.contains(coord)
+    }
+    fn is_valid_and_safe_at(&self, coord: &Coord) -> bool {
+        self.is_valid_at(coord) && self.is_safe_at(coord)
+    }
+    fn init(&mut self) {
+        self.compute_obstacles();
+    }
+    fn compute_obstacles(&mut self) {
+        let mut obstacles: HashSet<Coord> = HashSet::new();
+        for snake in &self.board.snakes {
+            // Compute for all snakes
+            for (i, body) in snake.body.iter().enumerate() {
+                if i == snake.body.len() - 1 {
+                    if !snake.just_ate() {
+                        self.board.safe_tails.insert(body.clone());
+                        continue;
+                    } else {
+                        debug!("{:?} just ate", snake);
+                    }
+                }
+                obstacles.insert(body.clone());
+            }
+            // Compute for opponents only
+            if snake.id == self.you.id {
+                continue;
+            }
+            let adjacent_head_coords = self.new_adjacent_coords(&snake.head);
+            if self.you.length <= snake.length {
+                self.board
+                    .dangerous_adjacent_heads
+                    .extend(adjacent_head_coords);
+            } else {
+                self.board.safe_adjacent_heads.extend(adjacent_head_coords);
+            }
+        }
+        obstacles.extend(self.board.hazards.clone());
+        self.board.obstacles = obstacles;
+    }
+    fn get_random_valid_direction(&self, coord: &Coord) -> Direction {
+        let mut valid_directions: Vec<Direction> = Vec::new();
+
+        for direction in Direction::iter() {
+            let adjacent_coord = self.new_adjacent_coord(coord, &direction);
+            if self.is_valid_and_safe_at(&adjacent_coord) {
+                valid_directions.push(direction);
+            }
+        }
+
+        // Default direction if no valid direction is found
+        let mut random_direction: Direction = Direction::Down;
+
+        if valid_directions.len() > 0 {
+            random_direction = *valid_directions.choose(&mut rand::thread_rng()).unwrap();
+        }
+        random_direction
+    }
+    fn shortest_distance(&self, start: &Coord, end: &Coord) -> Option<u32> {
+        let mut nodes = BinaryHeap::new();
+        let mut visited: HashSet<Coord> = HashSet::new();
+        let mut costs: HashMap<Coord, u32> = HashMap::new();
+        nodes.push(CoordItem {
+            coord: start.clone(),
+            cost: 0,
+        });
+        visited.insert(start.clone());
+        costs.insert(start.clone(), 0);
+        while let Some(CoordItem { coord, cost }) = nodes.pop() {
+            if coord == *end {
+                return Some(cost);
+            }
+            for adjacent_coord in self.new_adjacent_coords(&coord) {
+                if !self.is_valid_and_safe_at(&adjacent_coord) {
+                    continue;
+                }
+                if visited.contains(&adjacent_coord) {
+                    continue;
+                }
+                let new_cost = costs[&coord] + 5;
+                let adjacent_cost = costs.get(&adjacent_coord);
+                if adjacent_cost == None || new_cost < *adjacent_cost.unwrap() {
+                    costs.insert(adjacent_coord.clone(), new_cost);
+                    visited.insert(adjacent_coord.clone());
+                    nodes.push(CoordItem {
+                        coord: adjacent_coord.clone(),
+                        cost: new_cost,
+                    })
+                }
+            }
+        }
+        None
+    }
+    fn closest_food_distance(&self, coord: &Coord) -> Option<u32> {
+        let mut closest_distance: Option<u32> = None;
+        for food in &self.board.food {
+            if let Some(food_distance) = self.shortest_distance(coord, &food) {
+                if closest_distance == None || food_distance < closest_distance.unwrap() {
+                    closest_distance = Some(food_distance);
+                }
+            }
+        }
+        closest_distance
+    }
+    fn compute_controlled_squares(&self, exclusions: &HashSet<Coord>) -> ControlledSquares {
+        let mut squares: HashMap<String, HashMap<Coord, Square>> = HashMap::new();
+        let mut nodes: VecDeque<Square> = VecDeque::new();
+        let mut visited: HashSet<Coord> = HashSet::new();
+        visited.extend(exclusions);
+        let mut paths: HashMap<String, HashMap<Coord, Coord>> = HashMap::new();
+        let mut closest_food_distance: HashMap<String, Option<u32>> = HashMap::new();
+        let mut closest_tail_distance: HashMap<String, Option<u32>> = HashMap::new();
+        for snake in &self.board.snakes {
+            squares.insert(snake.id.clone(), HashMap::new());
+            paths.insert(snake.id.clone(), HashMap::new());
+            closest_food_distance.insert(snake.id.clone(), None);
+            closest_tail_distance.insert(snake.id.clone(), None);
+            let square = Square {
+                owner: snake.id.clone(),
+                coord: snake.head,
+                distance: 0,
+            };
+            nodes.push_back(square.clone());
+            visited.insert(snake.head);
+            squares
+                .get_mut(&snake.id)
+                .unwrap()
+                .insert(snake.head, square.clone());
+        }
+        while !nodes.is_empty() {
+            let current_square = nodes.pop_front().unwrap();
+            for coord in self.new_adjacent_coords(&current_square.coord) {
+                if !visited.contains(&coord) && self.is_valid_and_safe_at(&coord) {
+                    let current_square =
+                        squares[&current_square.owner][&current_square.coord].clone();
+                    let distance = current_square.distance + 1;
+                    let food = self.board.food.contains(&coord);
+                    let square = Square {
+                        owner: current_square.owner.clone(),
+                        coord,
+                        distance,
+                    };
+                    if closest_food_distance[&current_square.owner] == None && food {
+                        closest_food_distance.insert(current_square.owner.clone(), Some(distance));
+                    }
+                    if closest_tail_distance[&current_square.owner] == None
+                        && self.board.safe_tails.contains(&coord)
+                    {
+                        closest_tail_distance.insert(current_square.owner.clone(), Some(distance));
+                    }
+                    nodes.push_back(square.clone());
+                    visited.insert(coord);
+                    paths
+                        .get_mut(&current_square.owner)
+                        .unwrap()
+                        .insert(coord, current_square.coord);
+                    squares
+                        .get_mut(&current_square.owner)
+                        .unwrap()
+                        .insert(coord, square.clone());
+                }
+            }
+        }
+        ControlledSquares {
+            squares,
+            closest_food_distance,
+            closest_tail_distance,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -523,14 +531,13 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
         "########## TURN {:?} | {:?} ##########",
         gs.turn, gs.you.name
     );
-
-    gs.board.compute_obstacles(&gs.you);
+    gs.init();
 
     let mut strategies = BinaryHeap::new();
 
     strategies.push(Strategy {
         name: StrategyName::Random,
-        direction: gs.board.get_random_valid_direction(&gs.you.head),
+        direction: gs.get_random_valid_direction(&gs.you.head),
         cost: 10000,
     });
 
@@ -538,10 +545,9 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
     let mut closest_tail_distance = u32::MAX;
 
     for direction in Direction::iter() {
-        let mut exclusions: HashSet<Coord> = HashSet::new();
-        let adjacent_coord = gs.you.head.new_adjacent_coord(&direction);
+        let adjacent_coord = gs.new_adjacent_coord(&gs.you.head, &direction);
         let mut cost_mod: i32 = 0;
-        if !gs.board.is_valid_and_safe_at(&adjacent_coord) {
+        if !gs.is_valid_and_safe_at(&adjacent_coord) {
             info!("Direction {:?} is not safe", direction);
             continue;
         }
@@ -554,9 +560,8 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
             cost_mod -= 25;
         }
         // Follow our own tail when no food is in our controlled area and we aren't hungry yet
-        if let Some(my_tail_distance) = gs
-            .board
-            .shortest_distance(&adjacent_coord, &gs.you.body.last().unwrap())
+        if let Some(my_tail_distance) =
+            gs.shortest_distance(&adjacent_coord, &gs.you.body.last().unwrap())
         {
             if my_tail_distance > 1 || !gs.board.food.contains(&adjacent_coord) {
                 strategies.push(Strategy {
@@ -566,33 +571,17 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
                 });
             }
         }
-        match direction {
-            Direction::Up => {
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Down));
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Left));
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Right));
-            }
-            Direction::Down => {
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Up));
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Left));
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Right));
-            }
-            Direction::Left => {
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Up));
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Down));
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Right));
-            }
-            Direction::Right => {
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Up));
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Down));
-                exclusions.insert(gs.you.head.new_adjacent_coord(&Direction::Left));
-            }
-        };
-        let squares = gs.board.compute_controlled_squares(&exclusions);
+        let exclusions = gs
+            .new_adjacent_coords(&gs.you.head)
+            .iter()
+            .cloned()
+            .filter(|&coord| coord != adjacent_coord)
+            .collect();
+        let squares = gs.compute_controlled_squares(&exclusions);
         let squares_count = squares.squares[&gs.you.id].len() as i32;
         // Eat any food when we get hungry enough, even if the food is not in our controlled area
         if gs.you.health <= 33 {
-            if let Some(starving_food_distance) = gs.board.closest_food_distance(&adjacent_coord) {
+            if let Some(starving_food_distance) = gs.closest_food_distance(&adjacent_coord) {
                 strategies.push(Strategy {
                     name: StrategyName::Starving,
                     direction,
