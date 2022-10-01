@@ -66,7 +66,7 @@ enum GameMap {
     HzInnerWall,
     HzRings,
     HzColumns,
-    HzIslandBridges,
+    HzIslandsBridges,
     HzRiversBridges,
     HzSpiral,
     HzScatter,
