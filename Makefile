@@ -15,6 +15,10 @@ run: asdf-bootstrap ## Run the rust binary
 .PHONY: build
 build: asdf-bootstrap ## Build the rust binary
 	cargo build
+	
+.PHONY: test
+test: ## Run unit tests
+	cargo test
 
 .PHONY: play-solo
 play-local-solo: ## Play a solo game locally
