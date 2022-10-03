@@ -284,6 +284,8 @@ impl GameState {
         let mut width: i32 = 0;
         let mut y = 0;
         let mut snake_bodies: HashMap<char, Vec<(Coord, u32)>> = HashMap::new();
+        let mut food: HashSet<Coord> = HashSet::new();
+        let mut hazards: HashSet<Coord> = HashSet::new();
         for row in text.lines().map(str::trim).rev() {
             if !row.starts_with("|") {
                 continue;
@@ -294,12 +296,16 @@ impl GameState {
             if width == 0 {
                 width = splits.len() as i32;
             }
-            let coord = Coord { x, y };
             for split in splits {
+                let coord = Coord { x, y };
                 let chars: Vec<char> = split.chars().collect();
                 match chars[0] {
-                    'H' => {}
-                    'F' => {}
+                    'H' => {
+                        hazards.insert(coord);
+                    }
+                    'F' => {
+                        food.insert(coord);
+                    }
                     ' ' => {}
                     _ => {
                         let body_tuple = (coord, chars[1].to_string().parse().unwrap());
@@ -319,26 +325,29 @@ impl GameState {
             head: "head".to_owned(),
             tail: "tail".to_owned(),
         };
-        let snakes: Vec<Battlesnake> = Vec::new();
-        for (owner, coords) in snake_bodies {
-            let body: Vec<Coord> = snake_bodies
-                .get(&owner)
-                .iter()
-                .cloned()
-                .map(|t| t.get(0).unwrap())
-                .collect::<Vec<Coord>>();
+        let mut snakes: Vec<Battlesnake> = Vec::new();
+        let mut you: Option<Battlesnake> = None;
+        for (owner, mut coords) in snake_bodies.clone() {
+            coords.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            let (body, _): (Vec<Coord>, Vec<u32>) = coords.iter().cloned().unzip();
+            let length: u32 = body.len() as u32;
+            let head = body[0];
             let snake = Battlesnake {
-                id: "my_id".to_owned(),
+                id: owner.to_string(),
                 name: "my_name".to_owned(),
                 health: 100,
                 body,
                 latency: "100".to_owned(),
-                head: Coord { x: 0, y: 0 },
-                length: body.len() as u32,
+                head,
+                length,
                 shout: "shout!".to_owned(),
                 squad: "squad".to_owned(),
-                customizations,
+                customizations: customizations.clone(),
             };
+            if snake.id.clone() == "Y" {
+                you = Some(snake.clone())
+            }
+            snakes.push(snake);
         }
         let squad = SquadSettings {
             allow_body_collisions: true,
@@ -371,8 +380,8 @@ impl GameState {
         let board = Board {
             height,
             width,
-            food: HashSet::new(),
-            hazards: HashSet::new(),
+            food,
+            hazards,
             snakes,
             obstacles: HashSet::new(),
             safe_tails: HashSet::new(),
@@ -383,7 +392,7 @@ impl GameState {
             game,
             turn: 0,
             board,
-            you,
+            you: you.unwrap(),
         };
         gs
     }
@@ -755,16 +764,28 @@ pub mod tests {
     fn test_new_from_text() {
         let gs = GameState::new_from_text(
             "
-        |  |  |  |  |  |        
-        |  |Y0|  |  |  |        
-        |  |Y1|  |  |  |        
-        |  |Y2|  |  |  |        
-        |  |  |  |  |  |        
+        |  |  |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |  |  |        
         ",
         );
         assert_eq!(gs.you.length, 3);
         assert_eq!(gs.board.width, 5);
         assert_eq!(gs.board.height, 5);
         assert_eq!(gs.you.body.contains(&Coord { x: 1, y: 2 }), true);
+        assert_eq!(gs.you.head, Coord { x: 1, y: 3 });
+        assert_eq!(*gs.you.body.last().unwrap(), Coord { x: 1, y: 1 });
+        for snake in &gs.board.snakes {
+            if snake.id != "A" {
+                continue;
+            }
+            assert_eq!(snake.body.contains(&Coord { x: 3, y: 2 }), true);
+            assert_eq!(snake.head, Coord { x: 3, y: 1 });
+            assert_eq!(*snake.body.last().unwrap(), Coord { x: 3, y: 3 });
+        }
+        assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
+        assert_eq!(gs.board.hazards.contains(&Coord { x: 4, y: 4 }), true);
     }
 }
