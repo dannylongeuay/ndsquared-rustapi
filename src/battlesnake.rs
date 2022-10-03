@@ -282,9 +282,8 @@ impl GameState {
     fn new_from_text(text: &str) -> Self {
         let mut height: i32 = 0;
         let mut width: i32 = 0;
-        let mut length: u32 = 0;
         let mut y = 0;
-        let mut body: Vec<Coord> = Vec::new();
+        let mut snake_bodies: HashMap<char, Vec<(Coord, u32)>> = HashMap::new();
         for row in text.lines().map(str::trim).rev() {
             if !row.starts_with("|") {
                 continue;
@@ -295,14 +294,51 @@ impl GameState {
             if width == 0 {
                 width = splits.len() as i32;
             }
+            let coord = Coord { x, y };
             for split in splits {
-                if split.starts_with("Y") {
-                    length += 1;
-                    body.push(Coord { x, y });
+                let chars: Vec<char> = split.chars().collect();
+                match chars[0] {
+                    'H' => {}
+                    'F' => {}
+                    ' ' => {}
+                    _ => {
+                        let body_tuple = (coord, chars[1].to_string().parse().unwrap());
+                        if let Some(bodies) = snake_bodies.get_mut(&chars[0]) {
+                            bodies.push(body_tuple);
+                        } else {
+                            snake_bodies.insert(chars[0], vec![body_tuple]);
+                        }
+                    }
                 }
                 x += 1;
             }
             y += 1;
+        }
+        let customizations = Customizations {
+            color: "color".to_owned(),
+            head: "head".to_owned(),
+            tail: "tail".to_owned(),
+        };
+        let snakes: Vec<Battlesnake> = Vec::new();
+        for (owner, coords) in snake_bodies {
+            let body: Vec<Coord> = snake_bodies
+                .get(&owner)
+                .iter()
+                .cloned()
+                .map(|t| t.get(0).unwrap())
+                .collect::<Vec<Coord>>();
+            let snake = Battlesnake {
+                id: "my_id".to_owned(),
+                name: "my_name".to_owned(),
+                health: 100,
+                body,
+                latency: "100".to_owned(),
+                head: Coord { x: 0, y: 0 },
+                length: body.len() as u32,
+                shout: "shout!".to_owned(),
+                squad: "squad".to_owned(),
+                customizations,
+            };
         }
         let squad = SquadSettings {
             allow_body_collisions: true,
@@ -337,28 +373,11 @@ impl GameState {
             width,
             food: HashSet::new(),
             hazards: HashSet::new(),
-            snakes: vec![],
+            snakes,
             obstacles: HashSet::new(),
             safe_tails: HashSet::new(),
             safe_adjacent_heads: HashSet::new(),
             dangerous_adjacent_heads: HashSet::new(),
-        };
-        let customizations = Customizations {
-            color: "color".to_owned(),
-            head: "head".to_owned(),
-            tail: "tail".to_owned(),
-        };
-        let you = Battlesnake {
-            id: "my_id".to_owned(),
-            name: "my_name".to_owned(),
-            health: 100,
-            body,
-            latency: "100".to_owned(),
-            head: Coord { x: 0, y: 0 },
-            length,
-            shout: "shout!".to_owned(),
-            squad: "squad".to_owned(),
-            customizations,
         };
         let gs = GameState {
             game,
