@@ -19,6 +19,14 @@ build: asdf-bootstrap ## Build the rust binary
 .PHONY: test
 test: ## Run unit tests
 	cargo test
+	
+.PHONY: check
+check: ## Run clippy
+	cargo check
+	
+.PHONY: cq-check
+cq-check: check test ## Run code quality checks
+	
 
 .PHONY: play-solo
 play-local-solo: ## Play a solo game locally
