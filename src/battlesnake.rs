@@ -242,7 +242,7 @@ pub struct Battlesnake {
     /// Health value of this Battlesnake, between 0 and 100 inclusively. Example: 54
     health: u32,
     /// Array of coordinates representing this Battlesnake's location on the game board. This array is ordered from head to tail. Example: [{"x": 0, "y": 0}, ..., {"x": 2, "y": 0}]
-    body: Vec<Coord>,
+    body: VecDeque<Coord>,
     /// The previous response time of this Battlesnake, in milliseconds. If the Battlesnake timed out and failed to respond, the game timeout will be returned (game.timeout) Example: "500"
     latency: String,
     /// Coordinates for this Battlesnake's head. Equivalent to the first element of the body array. Example: {"x": 0, "y": 0}
@@ -329,7 +329,7 @@ impl GameState {
         let mut you: Option<Battlesnake> = None;
         for (owner, mut coords) in snake_bodies.clone() {
             coords.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-            let (body, _): (Vec<Coord>, Vec<u32>) = coords.iter().cloned().unzip();
+            let (body, _): (VecDeque<Coord>, Vec<u32>) = coords.iter().cloned().unzip();
             let length: u32 = body.len() as u32;
             let head = body[0];
             let snake = Battlesnake {
@@ -356,12 +356,12 @@ impl GameState {
             shared_length: true,
         };
         let royale = RoyaleSettings {
-            shrink_every_n_turns: 0,
+            shrink_every_n_turns: 5,
         };
         let settings = RulesetSettings {
-            food_spawn_chance: 0,
-            minimum_food: 0,
-            hazard_damage_per_turn: 0,
+            food_spawn_chance: 25,
+            minimum_food: 1,
+            hazard_damage_per_turn: 15,
             royale,
             squad,
         };
@@ -395,6 +395,82 @@ impl GameState {
             you: you.unwrap(),
         };
         gs
+    }
+    fn advance(&mut self, moves: HashMap<String, Coord>) {
+        let mut eaten_food: HashSet<Coord> = HashSet::new();
+        let mut snake_heads: HashMap<String, (Coord, u32)> = HashMap::new();
+        let mut snake_bodies: HashMap<String, HashSet<Coord>> = HashMap::new();
+        // Apply snake moves
+        for snake in self.board.snakes.iter_mut() {
+            let new_head = moves.get(&snake.id).unwrap().clone();
+            snake.head = new_head;
+            snake.body.push_front(new_head);
+            snake.body.pop_back();
+            snake.health -= 1;
+            // Consume food
+            if self.board.food.contains(&snake.head) {
+                snake.health = 100;
+                snake.body.push_back(snake.body.back().unwrap().clone());
+                eaten_food.insert(snake.head);
+            } else if self.board.hazards.contains(&snake.head) {
+                snake.health -= self.game.ruleset.settings.hazard_damage_per_turn;
+            }
+            snake.length = snake.body.len() as u32;
+            snake_heads.insert(snake.id.clone(), (snake.head, snake.length));
+            snake_bodies.insert(snake.id.clone(), HashSet::new());
+            for body in snake.body.range(1..) {
+                snake_bodies
+                    .get_mut(&snake.id)
+                    .unwrap()
+                    .insert(body.clone());
+            }
+        }
+        // Remove Eaten Food
+        for food in &eaten_food {
+            self.board.food.remove(food);
+        }
+        // Add new food
+
+        // Eliminate snakes
+        let mut eliminated_snakes: HashSet<String> = HashSet::new();
+        for snake in &self.board.snakes {
+            if snake.health <= 0 {
+                eliminated_snakes.insert(snake.id.clone());
+                continue;
+            }
+            if !self.in_bounds(&snake.head) {
+                eliminated_snakes.insert(snake.id.clone());
+                continue;
+            }
+            for (id, (head, length)) in &snake_heads {
+                // Snakes can't head-to-head with themselves
+                if &snake.id == id {
+                    continue;
+                }
+                if &snake.head == head && &snake.length <= length {
+                    eliminated_snakes.insert(snake.id.clone());
+                    continue;
+                }
+            }
+            for (_, body) in &snake_bodies {
+                if body.contains(&snake.head) {
+                    eliminated_snakes.insert(snake.id.clone());
+                    continue;
+                }
+            }
+        }
+
+        let mut snakes: Vec<Battlesnake> = Vec::new();
+        for snake in &self.board.snakes {
+            if eliminated_snakes.contains(&snake.id) {
+                continue;
+            }
+            if snake.id == self.you.id {
+                self.you = snake.clone();
+            }
+            snakes.push(snake.clone());
+        }
+        self.board.snakes = snakes;
     }
     fn new_adjacent_coord(&self, coord: &Coord, dir: &Direction) -> Coord {
         let mut x: i32 = coord.x;
@@ -581,7 +657,7 @@ impl GameState {
                         food_count.insert(owner.clone(), food_count[&owner] + 1);
                     }
                     for snake in &self.board.snakes {
-                        if *snake.body.last().unwrap() != adjacent_coord {
+                        if *snake.body.back().unwrap() != adjacent_coord {
                             continue;
                         }
                         tail_count.insert(owner.clone(), tail_count[&owner] + 1);
@@ -668,7 +744,7 @@ impl GameState {
             }
             // Follow our own tail when no food is in our controlled area and we aren't hungry yet
             if let Some(my_tail_distance) =
-                self.shortest_distance(&adjacent_coord, &self.you.body.last().unwrap())
+                self.shortest_distance(&adjacent_coord, &self.you.body.back().unwrap())
             {
                 if my_tail_distance > 1 || !self.board.food.contains(&adjacent_coord) {
                     strategies.push(Strategy {
@@ -776,16 +852,199 @@ pub mod tests {
         assert_eq!(gs.board.height, 5);
         assert_eq!(gs.you.body.contains(&Coord { x: 1, y: 2 }), true);
         assert_eq!(gs.you.head, Coord { x: 1, y: 3 });
-        assert_eq!(*gs.you.body.last().unwrap(), Coord { x: 1, y: 1 });
+        assert_eq!(*gs.you.body.back().unwrap(), Coord { x: 1, y: 1 });
         for snake in &gs.board.snakes {
             if snake.id != "A" {
                 continue;
             }
             assert_eq!(snake.body.contains(&Coord { x: 3, y: 2 }), true);
             assert_eq!(snake.head, Coord { x: 3, y: 1 });
-            assert_eq!(*snake.body.last().unwrap(), Coord { x: 3, y: 3 });
+            assert_eq!(*snake.body.back().unwrap(), Coord { x: 3, y: 3 });
         }
         assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
         assert_eq!(gs.board.hazards.contains(&Coord { x: 4, y: 4 }), true);
     }
+
+    #[test]
+    fn test_advance_basic() {
+        let mut gs = GameState::new_from_text(
+            "
+        |  |  |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        moves.insert("A".to_owned(), Coord { x: 3, y: 0 });
+        gs.advance(moves);
+        assert_eq!(gs.you.body.contains(&Coord { x: 1, y: 3 }), true);
+        assert_eq!(gs.you.head, Coord { x: 1, y: 4 });
+        assert_eq!(*gs.you.body.back().unwrap(), Coord { x: 1, y: 2 });
+        for snake in &gs.board.snakes {
+            if snake.id != "A" {
+                continue;
+            }
+            assert_eq!(snake.body.contains(&Coord { x: 3, y: 1 }), true);
+            assert_eq!(snake.head, Coord { x: 3, y: 0 });
+            assert_eq!(*snake.body.back().unwrap(), Coord { x: 3, y: 2 });
+        }
+        assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
+    }
+    #[test]
+    fn test_advance_food() {
+        let mut gs = GameState::new_from_text(
+            "
+        |  |  |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |F |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        moves.insert("A".to_owned(), Coord { x: 3, y: 0 });
+        gs.advance(moves);
+        for snake in &gs.board.snakes {
+            match snake.id.as_str() {
+                "A" => {
+                    assert_eq!(snake.health, 100);
+                    assert_eq!(snake.length, 4);
+                    assert_eq!(snake.body[2], Coord { x: 3, y: 2 });
+                    assert_eq!(snake.body[3], Coord { x: 3, y: 2 });
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
+        assert_eq!(gs.board.food.contains(&Coord { x: 3, y: 0 }), false);
+    }
+    #[test]
+    fn test_advance_multiple() {
+        let mut gs = GameState::new_from_text(
+            "
+        |  |  |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |F |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        moves.insert("A".to_owned(), Coord { x: 3, y: 0 });
+        gs.advance(moves);
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 5 });
+        moves.insert("A".to_owned(), Coord { x: 2, y: 0 });
+        gs.advance(moves);
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("A".to_owned(), Coord { x: 1, y: 0 });
+        gs.advance(moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+        for snake in &gs.board.snakes {
+            match snake.id.as_str() {
+                "A" => {
+                    assert_eq!(snake.health, 99);
+                    assert_eq!(snake.length, 5);
+                    assert_eq!(snake.body[0], Coord { x: 1, y: 0 });
+                    assert_eq!(snake.body[1], Coord { x: 2, y: 0 });
+                    assert_eq!(snake.body[2], Coord { x: 3, y: 0 });
+                    assert_eq!(snake.body[3], Coord { x: 3, y: 1 });
+                    assert_eq!(snake.body[4], Coord { x: 3, y: 2 });
+                }
+                _ => {}
+            }
+        }
+    }
+    #[test]
+    fn test_chase_tail() {
+        let mut gs = GameState::new_from_text(
+            "
+        |  |Y7|Y6|  |  |        
+        |  |Y0|Y5|  |  |        
+        |  |Y1|Y4|  |  |        
+        |  |Y2|Y3|  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        gs.advance(moves);
+        assert_eq!(gs.you.body[0], Coord { x: 1, y: 4 });
+        assert_eq!(gs.you.body[7], Coord { x: 2, y: 4 });
+        assert_eq!(gs.board.snakes.len(), 1);
+    }
+    #[test]
+    fn test_self_collision() {
+        let mut gs = GameState::new_from_text(
+            "
+        |Y8|Y7|Y6|  |  |        
+        |  |Y0|Y5|  |  |        
+        |  |Y1|Y4|  |  |        
+        |  |Y2|Y3|  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        gs.advance(moves);
+        assert_eq!(gs.board.snakes.len(), 0);
+    }
+    #[test]
+    fn test_other_collision() {
+        let mut gs = GameState::new_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|Y1|Y2|  |        
+        |A2|A1|A0|  |  |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 2 });
+        moves.insert("A".to_owned(), Coord { x: 3, y: 2 });
+        gs.advance(moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+    }
+    #[test]
+    fn test_head_loss() {
+        let mut gs = GameState::new_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|Y1|Y2|  |        
+        |  |  |  |  |  |        
+        |  |A0|A1|A2|  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 2 });
+        moves.insert("A".to_owned(), Coord { x: 1, y: 2 });
+        gs.advance(moves);
+        assert_eq!(gs.board.snakes.len(), 0);
+    }
+    #[test]
+    fn test_head_win() {
+        let mut gs = GameState::new_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|Y1|Y2|Y3|        
+        |  |  |  |  |  |        
+        |  |A0|A1|A2|  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 2 });
+        moves.insert("A".to_owned(), Coord { x: 1, y: 2 });
+        gs.advance(moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+    }
+    // TODO: test harzard with food
+    // TODO: test starving
 }
