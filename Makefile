@@ -29,11 +29,11 @@ cq-check: check test ## Run code quality checks
 	
 
 .PHONY: play-solo
-play-local-solo: ## Play a solo game locally
+play-solo: ## Play a solo game locally
 	battlesnake play --name solo_snake --url "http://localhost:8000" -g solo -v
 
 .PHONY: play-solo-browser
-play-local-solo-browser: ## Play a solo game locally, then open the replay in the browser
+play-solo-browser: ## Play a solo game locally, then open the replay in the browser
 	battlesnake play --name solo_snake --url "http://localhost:8000" -g solo --browser
 
 .PHONY: play-live
