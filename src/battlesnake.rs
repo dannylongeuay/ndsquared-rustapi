@@ -700,21 +700,22 @@ impl Search {
             return i32::MIN;
         }
         let mut score: i32 = 0;
-        // let territory_info = gs.compute_territory_info();
-        // score += territory_info
-        //     .controlled_squares
-        //     .get(&gs.you.id)
-        //     .unwrap()
-        //     .len() as i32;
+        let territory_info = gs.compute_territory_info();
+        score += territory_info
+            .controlled_squares
+            .get(&gs.you.id)
+            .unwrap()
+            .len() as i32;
         // score += territory_info.food_count.get(&gs.you.id).unwrap();
         // score += territory_info.tail_count.get(&gs.you.id).unwrap();
-        // if *territory_info.contains_our_tail.get(&gs.you.id).unwrap() {
-        //     score += 100;
-        // }
-        if let Some(food_distance) = gs.closest_food_distance(&gs.you.head) {
-            score -= food_distance as i32;
+        if *territory_info.contains_our_tail.get(&gs.you.id).unwrap() {
+            score += 5;
         }
+        // if let Some(food_distance) = gs.closest_food_distance(&gs.you.head) {
+        //     score -= food_distance as i32;
+        // }
         score += gs.you.health;
+        score += gs.you.length as i32 * 5;
         let mut biggest = true;
         for snake in &gs.board.snakes {
             if snake.id == gs.you.id {
@@ -943,6 +944,29 @@ pub mod tests {
         assert_eq!(gs.board.food.contains(&Coord { x: 0, y: 4 }), true);
         assert_eq!(gs.board.hazards.contains(&Coord { x: 4, y: 4 }), true);
         assert_eq!(gs.board.hazards.contains(&Coord { x: 0, y: 4 }), true);
+    }
+    #[test]
+    fn test_gamestate_cloning() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |  |  |H |
+        |  |Y0|  |A2|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A0|  |
+        |  |  |F |  |  |
+        ",
+        );
+        let mut cloned_gs = gs.clone();
+        let food = Coord { x: 1, y: 4 };
+        cloned_gs.board.food.remove(&food);
+        cloned_gs.board.snakes.pop();
+        cloned_gs.you.health -= 10;
+        assert_eq!(gs.board.food.contains(&food), true);
+        assert_eq!(gs.board.snakes.len(), 2);
+        assert_eq!(gs.you.health, 100);
+        assert_eq!(cloned_gs.board.food.contains(&food), false);
+        assert_eq!(cloned_gs.board.snakes.len(), 1);
+        assert_eq!(cloned_gs.you.health, 90);
     }
     #[test]
     fn test_advance_basic() {
@@ -1341,7 +1365,6 @@ pub mod tests {
         assert_eq!(gs.board.snakes.len(), 1);
         assert_eq!(gs.you.health, 100);
     }
-    // TODO: test royale
     #[test]
     fn test_shortest_distance() {
         let gs = new_gamestate_from_text(
@@ -1370,34 +1393,6 @@ pub mod tests {
         let dist = gs.closest_food_distance(&gs.you.head);
         assert_eq!(dist.unwrap(), 1);
     }
-    // #[test]
-    // fn test_minimax_basic() {
-    //     let mut gs = new_gamestate_from_text(
-    //         "
-    //     |  |F |  |  |H |
-    //     |  |Y0|  |A2|  |
-    //     |  |Y1|  |A1|  |
-    //     |  |Y2|  |A0|  |
-    //     |  |  |F |  |  |
-    //     ",
-    //     );
-    //     gs.init();
-    //     let mut search = Search::new(&gs);
-    //     let start = Instant::now();
-    //     let moves: HashMap<String, Coord> = HashMap::new();
-    //     search.minimax_alphabeta(
-    //         gs.clone(),
-    //         &gs.you.id,
-    //         gs.you.id.clone(),
-    //         start,
-    //         10,
-    //         i32::MIN,
-    //         i32::MAX,
-    //         moves.clone(),
-    //     );
-    //     assert_eq!(search.best_score, 1093);
-    //     assert_eq!(search.best_direction, Direction::Up);
-    // }
     #[test]
     fn test_search_basic() {
         let mut gs = new_gamestate_from_text(
@@ -1412,8 +1407,8 @@ pub mod tests {
         gs.init();
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
-        assert_eq!(search.best_score, 1097);
-        assert_eq!(search.best_direction, Direction::Left);
+        // assert_eq!(search.best_score, 1097);
+        assert_eq!(search.best_direction, Direction::Up);
     }
     #[test]
     fn test_search_solo() {
@@ -1429,30 +1424,25 @@ pub mod tests {
         gs.init();
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
-        assert_eq!(search.best_score, 1100);
+        // assert_eq!(search.best_score, 1100);
         assert_eq!(search.best_direction, Direction::Up);
     }
     #[test]
-    fn test_gamestate_cloning() {
-        let gs = new_gamestate_from_text(
+    fn test_search_choose_open_space() {
+        let mut gs = new_gamestate_from_text(
             "
-        |  |F |  |  |H |
-        |  |Y0|  |A2|  |
-        |  |Y1|  |A1|  |
-        |  |Y2|  |A0|  |
-        |  |  |F |  |  |
+        |  |  |  |  |  |
+        |  |  |  |  |  |
+        |  |  |  |  |  |
+        |  |  |  |Y1|Y0|
+        |  |  |Y3|Y2|F |
         ",
         );
-        let mut cloned_gs = gs.clone();
-        let food = Coord { x: 1, y: 4 };
-        cloned_gs.board.food.remove(&food);
-        cloned_gs.board.snakes.pop();
-        cloned_gs.you.health -= 10;
-        assert_eq!(gs.board.food.contains(&food), true);
-        assert_eq!(gs.board.snakes.len(), 2);
-        assert_eq!(gs.you.health, 100);
-        assert_eq!(cloned_gs.board.food.contains(&food), false);
-        assert_eq!(cloned_gs.board.snakes.len(), 1);
-        assert_eq!(cloned_gs.you.health, 90);
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        // assert_eq!(search.best_score, 1100);
+        assert_eq!(search.best_direction, Direction::Up);
     }
+    // TODO: test royale
 }
