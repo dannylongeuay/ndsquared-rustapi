@@ -4,6 +4,7 @@ use rocket_okapi::okapi::schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::time::Instant;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
@@ -113,7 +114,7 @@ pub struct RulesetSettings {
     /// Minimum food to keep on the board every turn.
     minimum_food: u32,
     /// Health damage a snake will take when ending its turn in a hazard. This stacks on top of the regular 1 damage a snake takes per turn.
-    hazard_damage_per_turn: u32,
+    hazard_damage_per_turn: i32,
     /// Royale game mode specific settings.
     royale: RoyaleSettings,
     /// Squad game mode specific settings.
@@ -151,19 +152,25 @@ pub struct Coord {
     y: i32,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct CoordItem {
-    coord: Coord,
-    cost: u32,
-}
-
-impl Ord for CoordItem {
-    fn cmp(&self, other: &Self) -> Ordering {
-        other.cost.cmp(&self.cost)
+impl Coord {
+    fn manhattan_distance(&self, other: &Coord) -> i32 {
+        (self.x - other.x).abs() + (self.y - other.y).abs()
     }
 }
 
-impl PartialOrd for CoordItem {
+#[derive(Debug, PartialEq, Eq)]
+pub struct PriorityCoord {
+    coord: Coord,
+    priority: u32,
+}
+
+impl Ord for PriorityCoord {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other.priority.cmp(&self.priority)
+    }
+}
+
+impl PartialOrd for PriorityCoord {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -181,63 +188,40 @@ pub struct Board {
     hazards: HashSet<Coord>,
     /// Array of Battlesnake Objects representing all Battlesnakes remaining on the game board (including yourself if you haven't been eliminated). Example: [{"id": "snake-one", ...}, ...]
     snakes: Vec<Battlesnake>,
-    /// User Defined
+    /// Set of coords for all snake's bodies minus tails.
     #[serde(skip)]
     obstacles: HashSet<Coord>,
+    /// Set of coords adjacent to enemy snake heads that are smaller in size.
     #[serde(skip)]
-    safe_tails: HashSet<Coord>,
+    stomps: HashSet<Coord>,
+    /// Set of coords adjacent to enemy snake heads that are equal or bigger in size.
     #[serde(skip)]
-    safe_adjacent_heads: HashSet<Coord>,
+    avoids: HashSet<Coord>,
+    /// Mapping of snake ids to their index in the snakes array.
     #[serde(skip)]
-    dangerous_adjacent_heads: HashSet<Coord>,
+    snake_indexes: HashMap<String, usize>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum StrategyName {
-    Random,
-    Starving,
-    Survival,
-    FollowMySelf,
-    FollowAFriend,
-    NomNom,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Strategy {
-    name: StrategyName,
-    direction: Direction,
-    cost: i32,
-}
-
-impl Ord for Strategy {
-    fn cmp(&self, other: &Self) -> Ordering {
-        if other.cost < self.cost {
-            return Ordering::Less;
-        } else if other.cost > self.cost {
-            return Ordering::Greater;
+impl Board {
+    fn get_snake(&self, id: &String) -> Option<&Battlesnake> {
+        let snake_index = self.snake_indexes.get(id);
+        if snake_index.is_none() {
+            return None;
         }
-        Ordering::Equal
+        self.snakes.get(*snake_index.unwrap())
     }
-}
-
-impl PartialOrd for Strategy {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+    fn center(&self) -> Coord {
+        Coord {
+            x: self.width / 2,
+            y: self.width / 2,
+        }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct Square {
-    owner: String,
-    coord: Coord,
-    distance: u32,
 }
 
 #[derive(Debug)]
-pub struct ControlledSquares {
-    squares: HashMap<String, HashMap<Coord, Square>>,
-    closest_food_distance: HashMap<String, Option<u32>>,
-    closest_tail_distance: HashMap<String, Option<u32>>,
+pub struct TerritoryInfo {
+    controlled_squares: HashMap<String, HashSet<Coord>>,
+    available_squares: HashMap<String, HashSet<Coord>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
@@ -247,9 +231,9 @@ pub struct Battlesnake {
     /// Name given to this Battlesnake by its author. Example: "Sneky McSnek Face"
     name: String,
     /// Health value of this Battlesnake, between 0 and 100 inclusively. Example: 54
-    health: u32,
+    health: i32,
     /// Array of coordinates representing this Battlesnake's location on the game board. This array is ordered from head to tail. Example: [{"x": 0, "y": 0}, ..., {"x": 2, "y": 0}]
-    body: Vec<Coord>,
+    body: VecDeque<Coord>,
     /// The previous response time of this Battlesnake, in milliseconds. If the Battlesnake timed out and failed to respond, the game timeout will be returned (game.timeout) Example: "500"
     latency: String,
     /// Coordinates for this Battlesnake's head. Equivalent to the first element of the body array. Example: {"x": 0, "y": 0}
@@ -262,15 +246,8 @@ pub struct Battlesnake {
     squad: String,
     /// The collection of customizations applied to this Battlesnake that represent how it is viewed.
     customizations: Customizations,
-}
-
-impl Battlesnake {
-    fn just_ate(&self) -> bool {
-        if self.body.len() < 2 {
-            return false;
-        }
-        self.body[self.body.len() - 1] == self.body[self.body.len() - 2]
-    }
+    #[serde(skip)]
+    eliminated: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
@@ -285,8 +262,95 @@ pub struct GameState {
     you: Battlesnake,
 }
 
+fn in_bounds(coord: &Coord, width: i32, height: i32) -> bool {
+    return coord.x >= 0 && coord.y >= 0 && coord.x < width && coord.y < height;
+}
+
 impl GameState {
-    fn new_adjacent_coord(&self, coord: &Coord, dir: &Direction) -> Coord {
+    fn advance(&mut self, moves: &HashMap<String, Coord>) {
+        let mut eaten_food: HashSet<Coord> = HashSet::new();
+        let mut snake_heads: HashMap<String, (Coord, u32)> = HashMap::new();
+        let mut snake_bodies: HashMap<String, HashSet<Coord>> = HashMap::new();
+        // Apply snake moves
+        for snake in self.board.snakes.iter_mut() {
+            let new_head = moves.get(&snake.id).unwrap().clone();
+            snake.head = new_head;
+            snake.body.push_front(new_head);
+            snake.body.pop_back();
+            // Only decrease health in non-constrictor modes
+            if self.game.ruleset.name == GameMode::Constrictor {
+                snake.body.push_back(snake.body.back().unwrap().clone());
+            } else {
+                snake.health -= 1;
+            }
+            // Consume food
+            if self.board.food.contains(&snake.head) {
+                snake.health = 100;
+                snake.body.push_back(snake.body.back().unwrap().clone());
+                eaten_food.insert(snake.head);
+            } else if self.board.hazards.contains(&snake.head) {
+                snake.health -= self.game.ruleset.settings.hazard_damage_per_turn;
+            }
+            snake.length = snake.body.len() as u32;
+            snake_heads.insert(snake.id.clone(), (snake.head, snake.length));
+            snake_bodies.insert(snake.id.clone(), HashSet::new());
+            for body in snake.body.range(1..) {
+                snake_bodies
+                    .get_mut(&snake.id)
+                    .unwrap()
+                    .insert(body.clone());
+            }
+        }
+        // Remove Eaten Food
+        for food in &eaten_food {
+            self.board.food.remove(food);
+        }
+        // TODO: Add new food?
+        // TODO: Add royale hazards?
+
+        // Eliminate snakes
+        for snake in self.board.snakes.iter_mut() {
+            if snake.health <= 0 {
+                snake.eliminated = true;
+                continue;
+            }
+            if !in_bounds(&snake.head, self.board.width, self.board.height) {
+                snake.eliminated = true;
+                continue;
+            }
+            for (id, (head, length)) in &snake_heads {
+                // Snakes can't head-to-head with themselves
+                if &snake.id == id {
+                    continue;
+                }
+                if &snake.head == head && &snake.length <= length {
+                    snake.eliminated = true;
+                    continue;
+                }
+            }
+            for (_, body) in &snake_bodies {
+                if body.contains(&snake.head) {
+                    snake.eliminated = true;
+                    continue;
+                }
+            }
+        }
+
+        // TODO: combine this into the previous loop?
+        let mut snakes: Vec<Battlesnake> = Vec::new();
+        for snake in &self.board.snakes {
+            if snake.id == self.you.id {
+                self.you = snake.clone();
+            }
+            if snake.eliminated {
+                continue;
+            }
+            snakes.push(snake.clone());
+        }
+        self.board.snakes = snakes;
+        self.compute_metadata();
+    }
+    fn adjacent_coord(&self, coord: &Coord, dir: &Direction) -> Coord {
         let mut x: i32 = coord.x;
         let mut y: i32 = coord.y;
         match self.game.ruleset.name {
@@ -311,109 +375,112 @@ impl GameState {
         }
         Coord { x, y }
     }
-    fn new_adjacent_coords(&self, coord: &Coord) -> Vec<Coord> {
-        let mut adjacent_coords: Vec<Coord> = Vec::new();
+    fn adjacent_moves(&self, coord: &Coord) -> Vec<(Coord, Direction)> {
+        let mut moves: Vec<(Coord, Direction)> = Vec::new();
         for direction in Direction::iter() {
-            adjacent_coords.push(self.new_adjacent_coord(coord, &direction));
+            moves.push((self.adjacent_coord(coord, &direction), direction));
         }
-        adjacent_coords
+        moves
     }
-    fn in_bounds(&self, coord: &Coord) -> bool {
-        return coord.x >= 0
-            && coord.y >= 0
-            && coord.x < self.board.width
-            && coord.y < self.board.height;
+    fn valid_at(&self, coord: &Coord) -> bool {
+        in_bounds(coord, self.board.width, self.board.height)
     }
-    fn is_valid_at(&self, coord: &Coord) -> bool {
-        self.in_bounds(coord)
-    }
-    fn is_safe_at(&self, coord: &Coord) -> bool {
+    fn safe_at(&self, coord: &Coord) -> bool {
         !self.board.obstacles.contains(coord)
     }
-    fn is_valid_and_safe_at(&self, coord: &Coord) -> bool {
-        self.is_valid_at(coord) && self.is_safe_at(coord)
+    fn viable(&self, coord: &Coord) -> bool {
+        self.valid_at(coord) && self.safe_at(coord)
     }
     fn init(&mut self) {
-        self.compute_obstacles();
+        self.compute_metadata();
     }
-    fn compute_obstacles(&mut self) {
+    fn compute_metadata(&mut self) {
         let mut obstacles: HashSet<Coord> = HashSet::new();
-        for snake in &self.board.snakes {
-            // Compute for all snakes
-            for (i, body) in snake.body.iter().enumerate() {
-                if i == snake.body.len() - 1 {
-                    if !snake.just_ate() {
-                        self.board.safe_tails.insert(body.clone());
-                        continue;
-                    } else {
-                        debug!("{:?} just ate", snake);
-                    }
+        let mut stomps: HashSet<Coord> = HashSet::new();
+        let mut avoids: HashSet<Coord> = HashSet::new();
+        let mut snake_indexes: HashMap<String, usize> = HashMap::new();
+        for (i, snake) in self.board.snakes.iter().enumerate() {
+            snake_indexes.insert(snake.id.clone(), i);
+            for (i, coord) in snake.body.iter().enumerate() {
+                if i != snake.body.len() - 1 {
+                    obstacles.insert(coord.clone());
                 }
-                obstacles.insert(body.clone());
-            }
-            // Compute for opponents only
-            if snake.id == self.you.id {
-                continue;
-            }
-            let adjacent_head_coords = self.new_adjacent_coords(&snake.head);
-            if self.you.length <= snake.length {
-                self.board
-                    .dangerous_adjacent_heads
-                    .extend(adjacent_head_coords);
-            } else {
-                self.board.safe_adjacent_heads.extend(adjacent_head_coords);
+                if self.you.id == snake.id {
+                    continue;
+                }
+                if i != 0 {
+                    continue;
+                }
+                if self.you.length <= snake.length {
+                    avoids.extend(self.adjacent_moves(&snake.head).iter().map(|&t| t.0));
+                } else {
+                    stomps.extend(self.adjacent_moves(&snake.head).iter().map(|&t| t.0));
+                }
             }
         }
-        obstacles.extend(self.board.hazards.clone());
+        if self.game.ruleset.settings.hazard_damage_per_turn >= self.you.health {
+            obstacles.extend(self.board.hazards.clone());
+        }
+        self.board.snake_indexes = snake_indexes;
         self.board.obstacles = obstacles;
+        self.board.stomps = stomps;
+        self.board.avoids = avoids;
     }
-    fn get_random_valid_direction(&self, coord: &Coord) -> Direction {
-        let mut valid_directions: Vec<Direction> = Vec::new();
+    fn random_valid_move(&self, coord: &Coord) -> (Coord, Direction) {
+        let mut valid_moves: Vec<(Coord, Direction)> = Vec::new();
+        let mut food_moves: Vec<(Coord, Direction)> = Vec::new();
 
         for direction in Direction::iter() {
-            let adjacent_coord = self.new_adjacent_coord(coord, &direction);
-            if self.is_valid_and_safe_at(&adjacent_coord) {
-                valid_directions.push(direction);
+            let adjacent_coord = self.adjacent_coord(coord, &direction);
+            if !self.viable(&adjacent_coord) {
+                continue;
+            }
+            valid_moves.push((adjacent_coord, direction));
+            if self.board.food.contains(&adjacent_coord) {
+                food_moves.push((adjacent_coord, direction));
             }
         }
 
         // Default direction if no valid direction is found
-        let mut random_direction: Direction = Direction::Down;
+        let mut random_move: (Coord, Direction) = (Coord { x: -1, y: -1 }, Direction::Down);
 
-        if valid_directions.len() > 0 {
-            random_direction = *valid_directions.choose(&mut rand::thread_rng()).unwrap();
+        if food_moves.len() > 0 {
+            random_move = *food_moves.choose(&mut rand::thread_rng()).unwrap();
+        } else if valid_moves.len() > 0 {
+            random_move = *valid_moves.choose(&mut rand::thread_rng()).unwrap();
         }
-        random_direction
+        random_move
     }
     fn shortest_distance(&self, start: &Coord, end: &Coord) -> Option<u32> {
-        let mut nodes = BinaryHeap::new();
+        let mut nodes: BinaryHeap<PriorityCoord> = BinaryHeap::new();
         let mut visited: HashSet<Coord> = HashSet::new();
-        let mut costs: HashMap<Coord, u32> = HashMap::new();
-        nodes.push(CoordItem {
+        let mut distances: HashMap<Coord, u32> = HashMap::new();
+        nodes.push(PriorityCoord {
             coord: start.clone(),
-            cost: 0,
+            priority: 0,
         });
         visited.insert(start.clone());
-        costs.insert(start.clone(), 0);
-        while let Some(CoordItem { coord, cost }) = nodes.pop() {
+        distances.insert(start.clone(), 0);
+        while let Some(PriorityCoord { coord, priority: _ }) = nodes.pop() {
             if coord == *end {
-                return Some(cost);
+                return Some(distances[&coord]);
             }
-            for adjacent_coord in self.new_adjacent_coords(&coord) {
-                if !self.is_valid_and_safe_at(&adjacent_coord) {
+            for (adj_coord, _) in self.adjacent_moves(&coord) {
+                if !self.viable(&adj_coord) {
                     continue;
                 }
-                if visited.contains(&adjacent_coord) {
+                if visited.contains(&adj_coord) {
                     continue;
                 }
-                let new_cost = costs[&coord] + 5;
-                let adjacent_cost = costs.get(&adjacent_coord);
-                if adjacent_cost == None || new_cost < *adjacent_cost.unwrap() {
-                    costs.insert(adjacent_coord.clone(), new_cost);
-                    visited.insert(adjacent_coord.clone());
-                    nodes.push(CoordItem {
-                        coord: adjacent_coord.clone(),
-                        cost: new_cost,
+                let new_distance = distances[&coord] + 1;
+                let adjacent_distance = distances.get(&adj_coord);
+                if adjacent_distance == None || new_distance < *adjacent_distance.unwrap() {
+                    distances.insert(adj_coord.clone(), new_distance);
+                    visited.insert(adj_coord.clone());
+                    let new_priority = distances[&coord] + adj_coord.manhattan_distance(end) as u32;
+                    nodes.push(PriorityCoord {
+                        coord: adj_coord.clone(),
+                        priority: new_priority,
                     })
                 }
             }
@@ -424,77 +491,408 @@ impl GameState {
         let mut closest_distance: Option<u32> = None;
         for food in &self.board.food {
             if let Some(food_distance) = self.shortest_distance(coord, &food) {
-                if closest_distance == None || food_distance < closest_distance.unwrap() {
+                if closest_distance.is_none() || food_distance < closest_distance.unwrap() {
                     closest_distance = Some(food_distance);
                 }
             }
         }
         closest_distance
     }
-    fn compute_controlled_squares(&self, exclusions: &HashSet<Coord>) -> ControlledSquares {
-        let mut squares: HashMap<String, HashMap<Coord, Square>> = HashMap::new();
-        let mut nodes: VecDeque<Square> = VecDeque::new();
+    // TODO: this is horribly innefficient
+    fn compute_territory_info(&self) -> TerritoryInfo {
+        let mut controlled_squares: HashMap<String, HashSet<Coord>> = HashMap::new();
+        let mut available_squares: HashMap<String, HashSet<Coord>> = HashMap::new();
+        let mut nodes: VecDeque<(String, u32, Coord)> = VecDeque::new();
+        let mut distances: HashMap<Coord, u32> = HashMap::new();
         let mut visited: HashSet<Coord> = HashSet::new();
-        visited.extend(exclusions);
-        let mut paths: HashMap<String, HashMap<Coord, Coord>> = HashMap::new();
-        let mut closest_food_distance: HashMap<String, Option<u32>> = HashMap::new();
-        let mut closest_tail_distance: HashMap<String, Option<u32>> = HashMap::new();
         for snake in &self.board.snakes {
-            squares.insert(snake.id.clone(), HashMap::new());
-            paths.insert(snake.id.clone(), HashMap::new());
-            closest_food_distance.insert(snake.id.clone(), None);
-            closest_tail_distance.insert(snake.id.clone(), None);
-            let square = Square {
-                owner: snake.id.clone(),
-                coord: snake.head,
-                distance: 0,
-            };
-            nodes.push_back(square.clone());
-            visited.insert(snake.head);
-            squares
+            controlled_squares.insert(snake.id.clone(), HashSet::new());
+            nodes.push_back((snake.id.clone(), 0, snake.head));
+            distances.insert(snake.head, 0);
+            controlled_squares
                 .get_mut(&snake.id)
                 .unwrap()
-                .insert(snake.head, square.clone());
+                .insert(snake.head);
         }
-        while !nodes.is_empty() {
-            let current_square = nodes.pop_front().unwrap();
-            for coord in self.new_adjacent_coords(&current_square.coord) {
-                if !visited.contains(&coord) && self.is_valid_and_safe_at(&coord) {
-                    let current_square =
-                        squares[&current_square.owner][&current_square.coord].clone();
-                    let distance = current_square.distance + 1;
-                    let food = self.board.food.contains(&coord);
-                    let square = Square {
-                        owner: current_square.owner.clone(),
-                        coord,
-                        distance,
-                    };
-                    if closest_food_distance[&current_square.owner] == None && food {
-                        closest_food_distance.insert(current_square.owner.clone(), Some(distance));
-                    }
-                    if closest_tail_distance[&current_square.owner] == None
-                        && self.board.safe_tails.contains(&coord)
-                    {
-                        closest_tail_distance.insert(current_square.owner.clone(), Some(distance));
-                    }
-                    nodes.push_back(square.clone());
-                    visited.insert(coord);
-                    paths
-                        .get_mut(&current_square.owner)
+        while let Some((owner, distance, current_coord)) = nodes.pop_front() {
+            for (adj_coord, _dir) in self.adjacent_moves(&current_coord) {
+                if !self.viable(&adj_coord) {
+                    continue;
+                }
+                let dist_check = distances.get(&adj_coord);
+                let new_distance = distance + 1;
+                if dist_check.is_none() {
+                    nodes.push_back((owner.clone(), new_distance, adj_coord));
+                    distances.insert(adj_coord, new_distance);
+                    controlled_squares
+                        .get_mut(&owner)
                         .unwrap()
-                        .insert(coord, current_square.coord);
-                    squares
-                        .get_mut(&current_square.owner)
+                        .insert(adj_coord);
+                } else if dist_check.is_some() && *dist_check.unwrap() == new_distance {
+                    // Squares are owned by all snakes that can reach them in the same distance
+                    controlled_squares
+                        .get_mut(&owner)
                         .unwrap()
-                        .insert(coord, square.clone());
+                        .insert(adj_coord);
                 }
             }
         }
-        ControlledSquares {
-            squares,
-            closest_food_distance,
-            closest_tail_distance,
+        for snake in &self.board.snakes {
+            nodes.clear();
+            visited.clear();
+            available_squares.insert(snake.id.clone(), HashSet::new());
+            nodes.push_back((snake.id.clone(), 0, snake.head));
+            visited.insert(snake.head);
+            available_squares
+                .get_mut(&snake.id)
+                .unwrap()
+                .insert(snake.head);
+            while let Some((_owner, distance, current_coord)) = nodes.pop_front() {
+                for (coord, _) in self.adjacent_moves(&current_coord) {
+                    if !visited.contains(&coord) && self.viable(&coord) {
+                        let distance = distance + 1;
+                        nodes.push_back((snake.id.clone(), distance, coord));
+                        visited.insert(coord);
+                        available_squares.get_mut(&snake.id).unwrap().insert(coord);
+                    }
+                }
+            }
         }
+        TerritoryInfo {
+            controlled_squares,
+            available_squares,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Score {
+    min: bool,
+    max: bool,
+    biggest: bool,
+    center_dist: i32,
+    tail_dist: i32,
+    food_dist: i32,
+    length: i32,
+    snake_stomps: i32,
+    snake_avoids: i32,
+    board_control: i32,
+    snakes_eliminated: i32,
+}
+
+impl Score {
+    fn new() -> Self {
+        Score {
+            min: false,
+            max: false,
+            biggest: false,
+            center_dist: 0,
+            tail_dist: 0,
+            food_dist: 0,
+            length: 0,
+            snake_stomps: 0,
+            snake_avoids: 0,
+            board_control: 0,
+            snakes_eliminated: 0,
+        }
+    }
+    fn sum(&self) -> i32 {
+        if self.min {
+            return i32::MIN;
+        } else if self.max {
+            return i32::MAX;
+        }
+        let mut result: i32 = 0;
+        if self.biggest {
+            result += 1000;
+        }
+        result += self.center_dist;
+        result += self.tail_dist;
+        result += self.food_dist;
+        result += self.length;
+        result += self.snake_stomps;
+        result += self.snake_avoids;
+        result += self.board_control;
+        result += self.snakes_eliminated;
+        result
+    }
+}
+
+#[derive(Debug)]
+pub struct Search {
+    current_depth: u32,
+    iteration_reached: u32,
+    advances: u32,
+    terminals: u32,
+    best_direction: Direction,
+    best_score: Score,
+    best_pv: Vec<Coord>,
+}
+
+impl Search {
+    fn new(gs: &GameState) -> Self {
+        let mut best_score = Score::new();
+        best_score.min = true;
+        Search {
+            current_depth: 0,
+            iteration_reached: 1,
+            advances: 0,
+            terminals: 0,
+            best_direction: gs.random_valid_move(&gs.you.head).1,
+            best_score,
+            best_pv: Vec::new(),
+        }
+    }
+    fn iterative_deepening(&mut self, gs: &GameState, max_depth: u32) {
+        let start = Instant::now();
+        for i in 1..=max_depth {
+            let moves: HashMap<String, Coord> = HashMap::new();
+            let mut root_pv: Vec<Coord> = Vec::new();
+            let _score = self.minimax_alphabeta(
+                gs.clone(),
+                &gs.you.id,
+                gs.you.id.clone(),
+                start,
+                i,
+                i32::MIN,
+                i32::MAX,
+                moves.clone(),
+                &mut root_pv,
+            );
+            let debug_header = format!("{} Depth {:?} {}", "#".repeat(75), i, "#".repeat(25));
+            if i <= 20 {
+                debug!("\n{}", debug_header);
+                debug!(
+                "Advances: {:?} | Terminals: {:?} | Best Direction: {:?} | Best Score Sum: {:?}",
+                self.advances,
+                self.terminals,
+                self.best_direction,
+                self.best_score.sum()
+            );
+                debug!("Sum: {:?}\n{:?}", _score.sum(), _score);
+                debug!(
+                    "Best Sum: {:?}\n{:?}",
+                    self.best_score.sum(),
+                    self.best_score
+                );
+                debug!("PV: {:?}\n{}", root_pv, "#".repeat(debug_header.len()));
+            }
+            self.advances = 0;
+            self.terminals = 0;
+            self.current_depth = 0;
+            if start.elapsed().as_millis() > gs.game.timeout as u128 - 50 {
+                break;
+            }
+            self.iteration_reached = i;
+        }
+        if self.best_score.sum() == i32::MIN {}
+    }
+
+    fn minimax_alphabeta(
+        &mut self,
+        gs: GameState,
+        maximizer: &String,
+        current_id: String,
+        start: Instant,
+        depth: u32,
+        mut alpha: i32,
+        mut beta: i32,
+        mut pending_moves: HashMap<String, Coord>,
+        pv: &mut Vec<Coord>,
+    ) -> Score {
+        if depth == 0 {
+            self.terminals += 1;
+            return self.evaluate(&gs);
+        }
+        let snake = gs.board.get_snake(&current_id);
+        if snake.is_none() {
+            self.terminals += 1;
+            return self.evaluate(&gs);
+        }
+        let snake = snake.unwrap();
+        let mut viable_moves: Vec<(Coord, Direction)> = gs
+            .adjacent_moves(&snake.head)
+            .iter()
+            .cloned()
+            .filter(|(coord, _)| gs.viable(&coord))
+            .collect();
+        trace!(
+            "Current Depth {:?} | Tree Depth {:?} | Current ID: {:?} | Viable Moves: {:?} | Pending Moves: {:?}",
+            self.current_depth,
+            depth,
+            current_id,
+            viable_moves,
+            pending_moves,
+        );
+        let next_index = (gs.board.snake_indexes[&current_id] + 1) % gs.board.snakes.len();
+        let next_id = gs.board.snakes[next_index].id.clone();
+        let mut score = Score::new();
+        if maximizer == &current_id {
+            score.min = true;
+        } else {
+            score.max = true;
+        }
+        // If a snake has no viable moves, we make a random move
+        if viable_moves.len() == 0 {
+            viable_moves.push(gs.random_valid_move(&snake.head));
+        }
+
+        for (coord, direction) in viable_moves {
+            let mut node_pv: Vec<Coord> = Vec::new();
+            let mut cloned_gs = gs.clone();
+            pending_moves.insert(current_id.clone(), coord);
+            // All snakes have made moves, so we advance the gamestate
+            if pending_moves.len() == cloned_gs.board.snakes.len() {
+                trace!(
+                    "Advanced > Current Depth {:?} | Tree Depth {:?} | Moves: {:?}",
+                    self.current_depth,
+                    depth,
+                    pending_moves
+                );
+                self.advances += 1;
+                cloned_gs.advance(&pending_moves);
+                // Remove the move that was just played and filter out any moves for eliminated snakes
+                pending_moves.remove(&current_id);
+                pending_moves.retain(|k, _| cloned_gs.board.snake_indexes.get(k).is_some());
+            }
+            trace!(
+                    "DOWN > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
+                    self.current_depth, depth, score, alpha, beta, current_id, coord, direction
+                );
+            if maximizer == &current_id {
+                self.current_depth += 1;
+                let node_score = self.minimax_alphabeta(
+                    cloned_gs,
+                    maximizer,
+                    next_id.clone(),
+                    start,
+                    depth - 1,
+                    alpha,
+                    beta,
+                    pending_moves.clone(),
+                    &mut node_pv,
+                );
+                if node_score.sum() > score.sum() {
+                    score = node_score;
+                }
+                self.current_depth -= 1;
+                if score.sum() > alpha {
+                    pv.clear();
+                    pv.push(coord);
+                    pv.append(&mut node_pv);
+                    alpha = score.sum();
+                }
+            } else {
+                self.current_depth += 1;
+                let node_score = self.minimax_alphabeta(
+                    cloned_gs,
+                    maximizer,
+                    next_id.clone(),
+                    start,
+                    depth - 1,
+                    alpha,
+                    beta,
+                    pending_moves.clone(),
+                    pv,
+                );
+                if node_score.sum() < score.sum() {
+                    score = node_score;
+                }
+                self.current_depth -= 1;
+                if score.sum() < beta {
+                    beta = score.sum();
+                }
+            }
+            trace!(
+                    "UP   > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
+                    self.current_depth, depth, score, alpha, beta, current_id, coord, direction
+                );
+            // If we run out of time, return before we attemp to set a new direction
+            if start.elapsed().as_millis() > gs.game.timeout as u128 - 50 {
+                score.min = true;
+                return score;
+            }
+            if self.current_depth == 0 && self.advances > 0 && score.sum() > self.best_score.sum() {
+                trace!(
+                    "New Best Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
+                    score, alpha, beta, current_id, coord, direction
+                );
+                self.best_direction = direction;
+                self.best_score = score.clone();
+                self.best_pv = pv.clone();
+            }
+            if maximizer == &current_id && alpha >= beta {
+                break;
+            } else if beta <= alpha {
+                break;
+            }
+        }
+        score
+    }
+
+    fn evaluate(&self, gs: &GameState) -> Score {
+        let mut score = Score::new();
+        // Elimination is bad
+        if gs.you.eliminated {
+            score.min = true;
+            return score;
+        }
+
+        // The closer we are to the center the better
+        score.center_dist = -gs.you.head.manhattan_distance(&gs.board.center());
+
+        // Penalize moving to where a bigger or equal snakes head might be
+        // Incentivize moving to where a smaller snakes head might be
+        if gs.board.avoids.contains(&gs.you.head) {
+            score.snake_avoids = -5000;
+        } else if gs.board.stomps.contains(&gs.you.head) {
+            score.snake_stomps = 5000;
+        }
+
+        // Maximize our "controlled" squares
+        let territory_info = gs.compute_territory_info();
+        if let Some(controlled_squares) = territory_info.controlled_squares.get(&gs.you.id) {
+            score.board_control = controlled_squares.len() as i32 * 10;
+        }
+
+        // Going into a dead end is bad
+        if let Some(available_squares) = territory_info.available_squares.get(&gs.you.id) {
+            if available_squares.len() < gs.you.length as usize + 1 {
+                score.board_control = -10000;
+            }
+        }
+
+        // Having a path to our own tail is good
+        if let Some(tail_distance) =
+            gs.shortest_distance(&gs.you.head, &gs.you.body.back().unwrap())
+        {
+            score.tail_dist = -(tail_distance as i32);
+        }
+
+        if let Some(food_distance) = gs.closest_food_distance(&gs.you.head) {
+            let food_mod: i32 = 101 - gs.you.health;
+            score.food_dist = -(food_distance as i32) * food_mod;
+        } else if gs.you.health < 20 {
+            score.food_dist = -5000;
+        }
+
+        // Growing bigger is good
+        score.length = gs.you.length as i32 * 100;
+
+        // Being the biggest snake is good
+        score.biggest = gs.board.snakes.iter().all(|s| {
+            if s.id == gs.you.id {
+                return true;
+            }
+            s.length < gs.you.length
+        });
+
+        // Other snakes being eliminated is good
+        if gs.game.ruleset.name != GameMode::Solo && gs.board.snakes.len() == 1 {
+            score.max = true;
+        }
+
+        score
     }
 }
 
@@ -533,109 +931,23 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
     );
     gs.init();
 
-    let mut strategies = BinaryHeap::new();
-
-    strategies.push(Strategy {
-        name: StrategyName::Random,
-        direction: gs.get_random_valid_direction(&gs.you.head),
-        cost: 10000,
-    });
-
-    let mut closest_food_distance = u32::MAX;
-    let mut closest_tail_distance = u32::MAX;
-
-    for direction in Direction::iter() {
-        let adjacent_coord = gs.new_adjacent_coord(&gs.you.head, &direction);
-        let mut cost_mod: i32 = 0;
-        if !gs.is_valid_and_safe_at(&adjacent_coord) {
-            info!("Direction {:?} is not safe", direction);
-            continue;
-        }
-        // Handle head collisions
-        if gs.board.dangerous_adjacent_heads.contains(&adjacent_coord) {
-            info!("Direction {:?} is dangerous", direction);
-            cost_mod += 25;
-        } else if gs.board.safe_adjacent_heads.contains(&adjacent_coord) {
-            info!("Direction {:?} is appetizing", direction);
-            cost_mod -= 25;
-        }
-        // Follow our own tail when no food is in our controlled area and we aren't hungry yet
-        if let Some(my_tail_distance) =
-            gs.shortest_distance(&adjacent_coord, &gs.you.body.last().unwrap())
-        {
-            if my_tail_distance > 1 || !gs.board.food.contains(&adjacent_coord) {
-                strategies.push(Strategy {
-                    name: StrategyName::FollowMySelf,
-                    direction,
-                    cost: 500 + my_tail_distance as i32 + cost_mod,
-                });
-            }
-        }
-        let exclusions = gs
-            .new_adjacent_coords(&gs.you.head)
-            .iter()
-            .cloned()
-            .filter(|&coord| coord != adjacent_coord)
-            .collect();
-        let squares = gs.compute_controlled_squares(&exclusions);
-        let squares_count = squares.squares[&gs.you.id].len() as i32;
-        // Eat any food when we get hungry enough, even if the food is not in our controlled area
-        if gs.you.health <= 33 {
-            if let Some(starving_food_distance) = gs.closest_food_distance(&adjacent_coord) {
-                strategies.push(Strategy {
-                    name: StrategyName::Starving,
-                    direction,
-                    cost: 250 - squares_count + starving_food_distance as i32 + cost_mod,
-                });
-            }
-        }
-        info!(
-            "Direction {:?} controls {:?} square(s)",
-            direction, squares_count
-        );
-        // Move towards an area with the most squares available if we can't eat or follow our tail
-        strategies.push(Strategy {
-            name: StrategyName::Survival,
-            direction,
-            cost: 1000 - squares_count + cost_mod,
-        });
-        // Eat food in my controlled area
-        if let Some(direction_food_distance) = squares.closest_food_distance[&gs.you.id] {
-            if squares_count as u32 > gs.you.length + 1
-                && direction_food_distance < closest_food_distance
-            {
-                strategies.push(Strategy {
-                    name: StrategyName::NomNom,
-                    direction,
-                    cost: 1 + direction_food_distance as i32,
-                });
-                closest_food_distance = direction_food_distance;
-            }
-        }
-        // Follow another snakes tail as a last resort
-        if let Some(direction_tail_distance) = squares.closest_tail_distance[&gs.you.id] {
-            if direction_tail_distance < closest_tail_distance {
-                strategies.push(Strategy {
-                    name: StrategyName::FollowAFriend,
-                    direction,
-                    cost: 5000 + direction_tail_distance as i32 + cost_mod,
-                });
-                closest_tail_distance = direction_tail_distance;
-            }
-        }
-    }
-
-    let strategy = strategies.pop().unwrap();
+    let mut search = Search::new(&gs);
+    search.iterative_deepening(&gs, 50);
 
     let mr = MoveResponse {
-        direction: strategy.direction,
+        direction: search.best_direction,
         shout: format!(
-            "STRATEGY: {:?} | COST: {:?} | MOVE: {:?}",
-            strategy.name, strategy.cost, strategy.direction
+            "MOVE: {:?} | SCORE: {:?} | ITERATIONS: {:?} | PV LENGTH: {:?}",
+            search.best_direction,
+            search.best_score.sum(),
+            search.iteration_reached,
+            search.best_pv.len()
         ),
     };
 
     info!("{:?}", mr);
+    info!("{:?}", search.best_score);
+    info!("PV: {:?}", search.best_pv);
 
     mr
 }
@@ -646,4 +958,1062 @@ pub fn start(gs: GameState) {
 
 pub fn end(gs: GameState) {
     info!("END: {:?}", gs);
+}
+
+#[cfg(test)]
+pub mod tests {
+    use super::*;
+    use test_log::test;
+
+    fn new_gamestate_from_text(text: &str) -> GameState {
+        let mut height: i32 = 0;
+        let mut width: i32 = 0;
+        let mut y = 0;
+        let mut snake_bodies: HashMap<char, Vec<(Coord, u32)>> = HashMap::new();
+        let mut food: HashSet<Coord> = HashSet::new();
+        let mut hazards: HashSet<Coord> = HashSet::new();
+        for row in text.lines().map(str::trim).rev() {
+            if !row.starts_with("|") {
+                continue;
+            }
+            let mut x = 0;
+            height += 1;
+            let splits: Vec<&str> = row.trim_start_matches("|").split_terminator("|").collect();
+            if width == 0 {
+                width = splits.len() as i32;
+            }
+            for split in splits {
+                let coord = Coord { x, y };
+                let chars: Vec<char> = split.chars().collect();
+                match chars[0] {
+                    'H' => {
+                        hazards.insert(coord);
+                    }
+                    'F' => {
+                        food.insert(coord);
+                    }
+                    'Z' => {
+                        hazards.insert(coord);
+                        food.insert(coord);
+                    }
+                    ' ' => {}
+                    _ => {
+                        let body_tuple = (coord, chars[1].to_string().parse().unwrap());
+                        if let Some(bodies) = snake_bodies.get_mut(&chars[0]) {
+                            bodies.push(body_tuple);
+                        } else {
+                            snake_bodies.insert(chars[0], vec![body_tuple]);
+                        }
+                    }
+                }
+                x += 1;
+            }
+            y += 1;
+        }
+        let customizations = Customizations {
+            color: "color".to_owned(),
+            head: "head".to_owned(),
+            tail: "tail".to_owned(),
+        };
+        let mut snakes: Vec<Battlesnake> = Vec::new();
+        let mut you: Option<Battlesnake> = None;
+        for (owner, mut coords) in snake_bodies.clone() {
+            coords.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            let (body, _): (VecDeque<Coord>, Vec<u32>) = coords.iter().cloned().unzip();
+            let length: u32 = body.len() as u32;
+            let head = body[0];
+            let snake = Battlesnake {
+                id: owner.to_string(),
+                name: "my_name".to_owned(),
+                health: 100,
+                body,
+                latency: "100".to_owned(),
+                head,
+                length,
+                shout: "shout!".to_owned(),
+                squad: "squad".to_owned(),
+                customizations: customizations.clone(),
+                eliminated: false,
+            };
+            if snake.id.clone() == "Y" {
+                you = Some(snake.clone())
+            }
+            snakes.push(snake);
+        }
+        let squad = SquadSettings {
+            allow_body_collisions: true,
+            shared_elimination: true,
+            shared_health: true,
+            shared_length: true,
+        };
+        let royale = RoyaleSettings {
+            shrink_every_n_turns: 5,
+        };
+        let settings = RulesetSettings {
+            food_spawn_chance: 25,
+            minimum_food: 1,
+            hazard_damage_per_turn: 15,
+            royale,
+            squad,
+        };
+        let ruleset = Ruleset {
+            name: GameMode::Standard,
+            version: "0.1.0".to_owned(),
+            settings,
+        };
+        let game = Game {
+            id: "gameid".to_owned(),
+            map: GameMap::Standard,
+            ruleset,
+            timeout: 500,
+            source: Source::Custom,
+        };
+        let board = Board {
+            height,
+            width,
+            food,
+            hazards,
+            snakes,
+            obstacles: HashSet::new(),
+            stomps: HashSet::new(),
+            avoids: HashSet::new(),
+            snake_indexes: HashMap::new(),
+        };
+        let mut gs = GameState {
+            game,
+            turn: 0,
+            board,
+            you: you.unwrap(),
+        };
+        gs.compute_metadata();
+        gs
+    }
+    #[test]
+    fn test_new_from_text() {
+        let gs = new_gamestate_from_text(
+            "
+        |Z |  |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        assert_eq!(gs.you.length, 3);
+        assert_eq!(gs.board.width, 5);
+        assert_eq!(gs.board.height, 5);
+        assert_eq!(gs.you.body.contains(&Coord { x: 1, y: 2 }), true);
+        assert_eq!(gs.you.head, Coord { x: 1, y: 3 });
+        assert_eq!(*gs.you.body.back().unwrap(), Coord { x: 1, y: 1 });
+        let snake = gs.board.get_snake(&"A".to_owned());
+        assert_eq!(snake.is_none(), false);
+        let snake = snake.unwrap();
+        assert_eq!(snake.body.contains(&Coord { x: 3, y: 2 }), true);
+        assert_eq!(snake.head, Coord { x: 3, y: 1 });
+        assert_eq!(*snake.body.back().unwrap(), Coord { x: 3, y: 3 });
+        assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
+        assert_eq!(gs.board.food.contains(&Coord { x: 0, y: 4 }), true);
+        assert_eq!(gs.board.hazards.contains(&Coord { x: 4, y: 4 }), true);
+        assert_eq!(gs.board.hazards.contains(&Coord { x: 0, y: 4 }), true);
+    }
+    #[test]
+    fn test_gamestate_cloning() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |  |  |H |
+        |  |Y0|  |A2|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A0|  |
+        |  |  |F |  |  |
+        ",
+        );
+        let mut cloned_gs = gs.clone();
+        let food = Coord { x: 1, y: 4 };
+        cloned_gs.board.food.remove(&food);
+        cloned_gs.board.snakes.pop();
+        cloned_gs.you.health -= 10;
+        assert_eq!(gs.board.food.contains(&food), true);
+        assert_eq!(gs.board.snakes.len(), 2);
+        assert_eq!(gs.you.health, 100);
+        assert_eq!(cloned_gs.board.food.contains(&food), false);
+        assert_eq!(cloned_gs.board.snakes.len(), 1);
+        assert_eq!(cloned_gs.you.health, 90);
+    }
+    #[test]
+    fn test_advance_basic() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        moves.insert("A".to_owned(), Coord { x: 3, y: 0 });
+        gs.advance(&moves);
+        assert_eq!(gs.you.body.contains(&Coord { x: 1, y: 3 }), true);
+        assert_eq!(gs.you.head, Coord { x: 1, y: 4 });
+        assert_eq!(*gs.you.body.back().unwrap(), Coord { x: 1, y: 2 });
+        let snake = gs.board.get_snake(&"A".to_owned());
+        assert_eq!(snake.is_none(), false);
+        let snake = snake.unwrap();
+        assert_eq!(snake.body.contains(&Coord { x: 3, y: 1 }), true);
+        assert_eq!(snake.head, Coord { x: 3, y: 0 });
+        assert_eq!(*snake.body.back().unwrap(), Coord { x: 3, y: 2 });
+        assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
+        assert_eq!(gs.board.hazards.contains(&Coord { x: 4, y: 4 }), true);
+    }
+    #[test]
+    fn test_advance_food() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |F |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        moves.insert("A".to_owned(), Coord { x: 3, y: 0 });
+        gs.advance(&moves);
+        let snake = gs.board.get_snake(&"A".to_owned());
+        assert_eq!(snake.is_none(), false);
+        let snake = snake.unwrap();
+        assert_eq!(snake.health, 100);
+        assert_eq!(snake.length, 4);
+        assert_eq!(snake.body[2], Coord { x: 3, y: 2 });
+        assert_eq!(snake.body[3], Coord { x: 3, y: 2 });
+        assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
+        assert_eq!(gs.board.food.contains(&Coord { x: 3, y: 0 }), false);
+    }
+    #[test]
+    fn test_advance_multiple() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |F |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        moves.insert("A".to_owned(), Coord { x: 3, y: 0 });
+        gs.advance(&moves);
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 5 });
+        moves.insert("A".to_owned(), Coord { x: 2, y: 0 });
+        gs.advance(&moves);
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("A".to_owned(), Coord { x: 1, y: 0 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+        let snake = gs.board.get_snake(&"A".to_owned());
+        assert_eq!(snake.is_none(), false);
+        let snake = snake.unwrap();
+        assert_eq!(snake.health, 99);
+        assert_eq!(snake.length, 5);
+        assert_eq!(snake.body[0], Coord { x: 1, y: 0 });
+        assert_eq!(snake.body[1], Coord { x: 2, y: 0 });
+        assert_eq!(snake.body[2], Coord { x: 3, y: 0 });
+        assert_eq!(snake.body[3], Coord { x: 3, y: 1 });
+        assert_eq!(snake.body[4], Coord { x: 3, y: 2 });
+    }
+    #[test]
+    fn test_advance_chase_tail() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |Y7|Y6|  |  |        
+        |  |Y0|Y5|  |  |        
+        |  |Y1|Y4|  |  |        
+        |  |Y2|Y3|  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        gs.advance(&moves);
+        assert_eq!(gs.you.body[0], Coord { x: 1, y: 4 });
+        assert_eq!(gs.you.body[7], Coord { x: 2, y: 4 });
+        assert_eq!(gs.board.snakes.len(), 1);
+    }
+    #[test]
+    fn test_advance_self_collision() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |Y8|Y7|Y6|  |  |        
+        |  |Y0|Y5|  |  |        
+        |  |Y1|Y4|  |  |        
+        |  |Y2|Y3|  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 4 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 0);
+    }
+    #[test]
+    fn test_advance_other_collision() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|Y1|Y2|  |        
+        |A2|A1|A0|  |  |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 2 });
+        moves.insert("A".to_owned(), Coord { x: 3, y: 2 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+    }
+    #[test]
+    fn test_advance_head_loss() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|Y1|Y2|  |        
+        |  |  |  |  |  |        
+        |  |A0|A1|A2|  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 2 });
+        moves.insert("A".to_owned(), Coord { x: 1, y: 2 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 0);
+    }
+    #[test]
+    fn test_advance_head_loss_over_food() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|Y1|Y2|  |        
+        |  |F |  |  |  |        
+        |  |A0|A1|A2|  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 2 });
+        moves.insert("A".to_owned(), Coord { x: 1, y: 2 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 0);
+        assert_eq!(gs.you.eliminated, true);
+    }
+    #[test]
+    fn test_advance_head_win() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|Y1|Y2|Y3|        
+        |  |  |  |  |  |        
+        |  |A0|A1|A2|  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 2 });
+        moves.insert("A".to_owned(), Coord { x: 1, y: 2 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+    }
+    #[test]
+    fn test_advance_head_win_over_food() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|Y1|Y2|Y3|        
+        |  |F |  |  |  |        
+        |  |A0|A1|A2|  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 1, y: 2 });
+        moves.insert("A".to_owned(), Coord { x: 1, y: 2 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+        assert_eq!(gs.you.health, 100);
+    }
+    #[test]
+    fn test_advance_hazard_basic() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |H |Y0|Y1|Y2|  |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 0, y: 3 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+        assert_eq!(gs.you.health, 84);
+    }
+    #[test]
+    fn test_advance_hazard_death() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |H |Y0|Y1|Y2|  |        
+        |H |H |H |H |H |        
+        |  |  |  |  |H |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let coords = vec![
+            Coord { x: 0, y: 3 },
+            Coord { x: 0, y: 2 },
+            Coord { x: 1, y: 2 },
+            Coord { x: 2, y: 2 },
+            Coord { x: 3, y: 2 },
+            Coord { x: 4, y: 2 },
+            Coord { x: 4, y: 1 },
+        ];
+        for coord in coords {
+            let mut moves: HashMap<String, Coord> = HashMap::new();
+            moves.insert("Y".to_owned(), coord);
+            gs.advance(&moves);
+        }
+        let expected_health = 100 - 16 * 7;
+        assert_eq!(gs.you.head, Coord { x: 4, y: 1 });
+        assert_eq!(gs.board.snakes.len(), 0);
+        assert_eq!(gs.you.eliminated, true);
+        assert_eq!(gs.you.health, expected_health);
+    }
+    #[test]
+    fn test_advance_hazard_with_food() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |Z |Y0|Y1|Y2|  |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 0, y: 3 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+        assert_eq!(gs.you.health, 100);
+    }
+    #[test]
+    fn test_advance_starving() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |H |Y0|Y1|Y2|  |        
+        |H |H |H |H |H |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let coords = vec![
+            Coord { x: 0, y: 3 },
+            Coord { x: 0, y: 2 },
+            Coord { x: 1, y: 2 },
+            Coord { x: 2, y: 2 },
+            Coord { x: 3, y: 2 },
+            Coord { x: 4, y: 2 },
+            Coord { x: 3, y: 1 },
+            Coord { x: 2, y: 1 },
+            Coord { x: 1, y: 1 },
+            Coord { x: 0, y: 1 },
+        ];
+        for coord in coords {
+            let mut moves: HashMap<String, Coord> = HashMap::new();
+            moves.insert("Y".to_owned(), coord);
+            gs.advance(&moves);
+        }
+        assert_eq!(gs.you.head, Coord { x: 0, y: 1 });
+        assert_eq!(gs.board.snakes.len(), 0);
+        assert_eq!(gs.you.eliminated, true);
+        assert_eq!(gs.you.health, 0);
+    }
+    #[test]
+    fn test_advance_eat_food_on_starve_turn() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |H |Y0|Y1|Y2|  |        
+        |H |H |H |H |H |        
+        |F |  |  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let coords = vec![
+            Coord { x: 0, y: 3 },
+            Coord { x: 0, y: 2 },
+            Coord { x: 1, y: 2 },
+            Coord { x: 2, y: 2 },
+            Coord { x: 3, y: 2 },
+            Coord { x: 4, y: 2 },
+            Coord { x: 3, y: 1 },
+            Coord { x: 2, y: 1 },
+            Coord { x: 1, y: 1 },
+            Coord { x: 0, y: 1 },
+        ];
+        for coord in coords {
+            let mut moves: HashMap<String, Coord> = HashMap::new();
+            moves.insert("Y".to_owned(), coord);
+            gs.advance(&moves);
+        }
+        assert_eq!(gs.you.head, Coord { x: 0, y: 1 });
+        assert_eq!(gs.board.snakes.len(), 1);
+        assert_eq!(gs.you.health, 100);
+    }
+    #[test]
+    fn test_advance_wrapped() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|  |  |  |        
+        |  |Y1|  |  |  |        
+        |  |Y2|  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        gs.game.ruleset.name = GameMode::Wrapped;
+        let coords = vec![
+            Coord { x: 1, y: 4 },
+            Coord { x: 1, y: 0 },
+            Coord { x: 1, y: 1 },
+            Coord { x: 1, y: 2 },
+        ];
+        for coord in coords {
+            let mut moves: HashMap<String, Coord> = HashMap::new();
+            moves.insert("Y".to_owned(), coord);
+            gs.advance(&moves);
+        }
+        assert_eq!(gs.you.body.contains(&Coord { x: 1, y: 1 }), true);
+        assert_eq!(gs.you.head, Coord { x: 1, y: 2 });
+        assert_eq!(*gs.you.body.back().unwrap(), Coord { x: 1, y: 0 });
+        assert_eq!(gs.board.snakes.len(), 1);
+    }
+    #[test]
+    fn test_advance_constrictor() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |  |Y0|  |  |  |        
+        |  |Y1|  |  |  |        
+        |  |Y2|  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        gs.game.ruleset.name = GameMode::Constrictor;
+        let coords = vec![
+            Coord { x: 1, y: 4 },
+            Coord { x: 2, y: 4 },
+            Coord { x: 3, y: 4 },
+            Coord { x: 4, y: 4 },
+        ];
+        for coord in coords {
+            let mut moves: HashMap<String, Coord> = HashMap::new();
+            moves.insert("Y".to_owned(), coord);
+            gs.advance(&moves);
+        }
+        assert_eq!(gs.you.body.contains(&Coord { x: 1, y: 3 }), true);
+        assert_eq!(gs.you.body.contains(&Coord { x: 1, y: 4 }), true);
+        assert_eq!(gs.you.body.contains(&Coord { x: 2, y: 4 }), true);
+        assert_eq!(gs.you.body.contains(&Coord { x: 3, y: 4 }), true);
+        assert_eq!(gs.you.head, Coord { x: 4, y: 4 });
+        assert_eq!(*gs.you.body.back().unwrap(), Coord { x: 1, y: 2 });
+        assert_eq!(gs.board.snakes.len(), 1);
+        assert_eq!(gs.you.health, 100);
+    }
+    #[test]
+    fn test_shortest_distance_basic_01() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let dist = gs.shortest_distance(&gs.you.head, &Coord { x: 1, y: 4 });
+        assert_eq!(dist.unwrap(), 1);
+    }
+    #[test]
+    fn test_shortest_distance_basic_02() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let dist = gs.shortest_distance(&gs.you.head, &Coord { x: 2, y: 0 });
+        assert_eq!(dist.unwrap(), 4);
+    }
+    #[test]
+    fn test_shortest_distance_basic_03() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |  |A3|H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|Y3|A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let dist = gs.shortest_distance(&gs.you.head, &Coord { x: 4, y: 4 });
+        assert_eq!(dist.unwrap(), 4);
+    }
+    #[test]
+    fn test_shortest_distance_basic_04() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |A4|A3|H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|Y3|A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let dist = gs.shortest_distance(&gs.you.head, &Coord { x: 4, y: 4 });
+        assert_eq!(dist.unwrap(), 10);
+    }
+    #[test]
+    fn test_shortest_distance_basic_05() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |A4|A3|H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|Y4|A1|  |        
+        |  |Y2|Y3|A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let dist = gs.shortest_distance(&gs.you.head, &Coord { x: 4, y: 4 });
+        assert_eq!(dist.unwrap(), 12);
+    }
+    #[test]
+    fn test_shortest_distance_basic_06() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |A5|A4|H |        
+        |  |Y0|  |A3|  |        
+        |  |Y1|Y4|A2|  |        
+        |  |Y2|Y3|A1|  |        
+        |  |  |F |A0|  |        
+        ",
+        );
+        let dist = gs.shortest_distance(&gs.you.head, &Coord { x: 4, y: 4 });
+        assert_eq!(dist.is_none(), true);
+    }
+    #[test]
+    fn test_territory_info_01() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |A5|A4|H |        
+        |  |Y0|  |A3|  |        
+        |  |Y1|Y4|A2|  |        
+        |  |Y2|Y3|A1|  |        
+        |  |  |F |A0|  |        
+        ",
+        );
+        let t_info = gs.compute_territory_info();
+        let controlled_squares = t_info.controlled_squares.get(&gs.you.id).unwrap();
+        assert_eq!(controlled_squares.len(), 9);
+        let available_squares = t_info.available_squares.get(&gs.you.id).unwrap();
+        assert_eq!(available_squares.len(), 12);
+    }
+    #[test]
+    fn test_territory_info_02() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |A4|A3|H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|Y4|A1|  |        
+        |  |Y2|Y3|A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let t_info = gs.compute_territory_info();
+        let controlled_squares = t_info.controlled_squares.get(&gs.you.id).unwrap();
+        assert_eq!(controlled_squares.len(), 10);
+        let available_squares = t_info.available_squares.get(&gs.you.id).unwrap();
+        assert_eq!(available_squares.len(), 18);
+    }
+    #[test]
+    fn test_closest_food_distance() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |  |  |H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|  |A1|  |        
+        |  |Y2|  |A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let dist = gs.closest_food_distance(&gs.you.head);
+        assert_eq!(dist.unwrap(), 1);
+    }
+    #[test]
+    fn test_search_basic() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |F |  |  |H |
+        |  |Y0|  |A2|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A0|  |
+        |  |  |F |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_solo() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |F |  |  |H |
+        |  |Y0|  |  |  |
+        |  |Y1|  |  |  |
+        |  |Y2|  |  |  |
+        |  |  |F |  |  |
+        ",
+        );
+        gs.init();
+        gs.game.ruleset.name = GameMode::Solo;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_01() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |  |  |  |  |
+        |  |  |  |  |  |
+        |  |  |  |Y1|Y0|
+        |  |  |Y3|Y2|F |
+        ",
+        );
+        gs.init();
+        gs.game.ruleset.name = GameMode::Solo;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_02() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |Y0|  |  |  |  |  |  |
+        |Y5|Y4|Y3|Y2|Y1|  |  |  |  |  |  |
+        |Y6|  |  |  |  |  |  |  |  |  |  |
+        |Y7|  |  |  |  |  |  |  |  |  |  |
+        |Y8|  |  |  |  |  |  |  |  |  |  |
+        |Y9|  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |F |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        gs.game.ruleset.name = GameMode::Solo;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_03() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |A1|A0|  |  |  |  |  |  |  |  |
+        |  |A2|  |  |  |  |  |  |  |  |  |
+        |  |A3|  |  |  |  |  |  |  |  |  |
+        |  |A4|A5|  |  |  |  |  |  |  |  |
+        |  |  |A6|  |  |  |  |  |  |  |  |
+        |  |  |A7|A8|A9|  |  |  |  |  |  |
+        |Y1|Y0|  |  |  |  |  |  |  |  |  |
+        |Y2|Y3|  |  |  |  |F |  |  |  |  |
+        |  |Y4|  |  |  |  |  |  |  |  |  |
+        |  |Y5|Y6|  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_04() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |A1|A0|  |  |  |  |  |  |  |  |
+        |  |A2|  |  |  |  |  |  |  |  |  |
+        |  |A3|  |  |  |  |  |  |  |  |  |
+        |  |A4|A5|  |  |  |  |  |  |  |  |
+        |  |  |A6|  |  |  |  |  |  |  |  |
+        |  |  |A7|A8|A9|  |  |  |  |  |  |
+        |Y1|Y0|  |  |  |  |  |  |  |  |  |
+        |Y2|Y3|  |  |  |  |F |  |  |  |  |
+        |  |Y4|  |  |  |  |  |  |  |  |  |
+        |  |Y5|Y6|  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        for snake in gs.board.snakes.iter_mut() {
+            if snake.id != gs.you.id {
+                continue;
+            }
+            snake.health = 10;
+        }
+        gs.you.health = 10;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_05() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |H |H |A9|  |H |H |H |  |Y4|H |H |
+        |H |  |A8|  |A0|H |  |  |Y3|  |H |
+        |  |  |A7|  |A1|F |Y0|Y1|Y2|  |  |
+        |  |  |A6|  |A2|H |  |  |  |  |  |
+        |H |  |A5|A4|A3|H |  |  |  |  |H |
+        |H |H |  |H |H |H |H |H |  |H |H |
+        |H |  |  |  |  |H |  |  |  |  |H |
+        |  |  |  |  |  |H |  |Y9|  |F |  |
+        |  |  |  |  |  |  |  |Y8|  |  |  |
+        |H |  |  |  |  |H |  |Y7|  |  |H |
+        |H |H |  |  |H |H |H |Y6|Y5|H |H |
+        ",
+        );
+        gs.init();
+        gs.game.ruleset.name = GameMode::Wrapped;
+        gs.game.ruleset.settings.hazard_damage_per_turn = 100;
+        for snake in gs.board.snakes.iter_mut() {
+            if snake.id != gs.you.id {
+                continue;
+            }
+            snake.health = 80;
+        }
+        gs.you.health = 80;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Down);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
+    #[test]
+    fn test_search_cutoff_enemy_01() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |Y0|F |  |  |  |  |  |  |  |  |
+        |A0|Y1|  |  |  |  |  |  |  |  |  |
+        |A1|Y2|  |  |  |  |  |  |  |  |  |
+        |A2|Y3|Y4|  |  |  |  |  |  |  |  |
+        |A3|A4|Y5|Y6|Y7|Y8|  |  |  |  |  |
+        |  |A5|A6|A7|A8|A9|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        assert_eq!(search.best_score.sum(), i32::MAX);
+    }
+    #[test]
+    fn test_search_cutoff_enemy_02() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |Y1|Y0|  |F |  |  |  |  |  |  |
+        |A0|Y2|  |  |  |  |  |  |  |  |  |
+        |A1|Y3|Y4|  |  |  |  |  |  |  |  |
+        |A2|A3|Y5|Y6|Y7|Y8|  |  |  |  |  |
+        |  |A4|A5|A6|A7|A8|  |  |  |  |  |
+        |  |  |  |  |  |A9|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        gs.game.timeout = 1000;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        assert_eq!(search.best_score.sum(), i32::MAX);
+    }
+    #[test]
+    fn test_search_stomp() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |A1|A2|
+        |  |Y0|  |A0|  |
+        |  |Y1|  |  |  |
+        |  |Y2|  |  |  |
+        |  |Y3|  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_stomp_trapped() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |A0|  |  |  |  |
+        |A1|Y0|F |  |  |
+        |A2|Y1|  |  |  |
+        |  |Y2|  |  |  |
+        |  |Y3|  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        assert_eq!(search.best_score.sum(), i32::MAX);
+    }
+    #[test]
+    fn test_search_avoid() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |A0|A1|A2|
+        |  |Y0|  |  |  |
+        |  |Y1|  |  |  |
+        |  |Y2|  |  |  |
+        |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Left);
+        // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_avoid_with_food() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |F |A0|A1|A2|
+        |  |Y0|F |  |  |
+        |  |Y1|  |  |  |
+        |  |Y2|  |  |  |
+        |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Left);
+        // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_avoid_with_food_while_starving() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |  |  |
+        |  |Y1|  |A0|  |
+        |  |Y2|  |A1|  |
+        |  |  |  |A2|  |
+        ",
+        );
+        gs.init();
+        for snake in gs.board.snakes.iter_mut() {
+            if snake.id != gs.you.id {
+                continue;
+            }
+            snake.health = 1;
+        }
+        gs.you.health = 1;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_inveitable_loss_01() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |A3|  |
+        ",
+        );
+        gs.init();
+        for snake in gs.board.snakes.iter_mut() {
+            if snake.id != gs.you.id {
+                continue;
+            }
+            snake.health = 1;
+        }
+        gs.you.health = 1;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        assert_eq!(search.best_score.sum(), i32::MIN);
+    }
+    #[test]
+    fn test_search_meeting_of_the_minds() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |B3|B4|  |  |  |  |
+        |  |  |  |  |  |B2|  |  |  |  |  |
+        |  |  |  |  |  |B1|  |  |  |  |  |
+        |  |  |  |  |  |B0|  |  |  |  |  |
+        |  |Y3|Y2|Y1|Y0|F |C0|C1|C2|C3|C4|
+        |  |  |  |  |  |A0|  |  |  |  |C5|
+        |  |  |  |  |  |A1|  |  |  |  |  |
+        |  |  |  |  |  |A2|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Down);
+        // assert_eq!(search.best_score, 100);
+    }
 }
