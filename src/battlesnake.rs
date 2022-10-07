@@ -401,7 +401,6 @@ impl GameState {
         let mut snake_indexes: HashMap<String, usize> = HashMap::new();
         for (i, snake) in self.board.snakes.iter().enumerate() {
             snake_indexes.insert(snake.id.clone(), i);
-            obstacles.extend(snake.body.range(..snake.body.len() - 1));
             for (i, coord) in snake.body.iter().enumerate() {
                 if i != snake.body.len() - 1 {
                     obstacles.insert(coord.clone());
@@ -418,6 +417,9 @@ impl GameState {
                     stomps.extend(self.adjacent_moves(&snake.head).iter().map(|&t| t.0));
                 }
             }
+        }
+        if self.game.ruleset.settings.hazard_damage_per_turn >= self.you.health {
+            obstacles.extend(self.board.hazards.clone());
         }
         self.board.snake_indexes = snake_indexes;
         self.board.obstacles = obstacles;
@@ -773,9 +775,6 @@ impl Search {
                 if node_score.sum() > score.sum() {
                     score = node_score;
                 }
-                if score.sum() == i32::MAX {
-                    debug!("maxxing out!");
-                }
                 self.current_depth -= 1;
                 if score.sum() > alpha {
                     pv.clear();
@@ -1019,7 +1018,6 @@ pub mod tests {
         let mut snakes: Vec<Battlesnake> = Vec::new();
         let mut you: Option<Battlesnake> = None;
         for (owner, mut coords) in snake_bodies.clone() {
-            debug!("{:?}", owner.to_string());
             coords.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
             let (body, _): (VecDeque<Coord>, Vec<u32>) = coords.iter().cloned().unzip();
             let length: u32 = body.len() as u32;
@@ -1801,6 +1799,38 @@ pub mod tests {
         // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
+    fn test_search_choose_open_space_05() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |H |H |A9|  |H |H |H |  |Y4|H |H |
+        |H |  |A8|  |A0|H |  |  |Y3|  |H |
+        |  |  |A7|  |A1|F |Y0|Y1|Y2|  |  |
+        |  |  |A6|  |A2|H |  |  |  |  |  |
+        |H |  |A5|A4|A3|H |  |  |  |  |H |
+        |H |H |  |H |H |H |H |H |  |H |H |
+        |H |  |  |  |  |H |  |  |  |  |H |
+        |  |  |  |  |  |H |  |Y9|  |F |  |
+        |  |  |  |  |  |  |  |Y8|  |  |  |
+        |H |  |  |  |  |H |  |Y7|  |  |H |
+        |H |H |  |  |H |H |H |Y6|Y5|H |H |
+        ",
+        );
+        gs.init();
+        gs.game.ruleset.name = GameMode::Wrapped;
+        gs.game.ruleset.settings.hazard_damage_per_turn = 100;
+        for snake in gs.board.snakes.iter_mut() {
+            if snake.id != gs.you.id {
+                continue;
+            }
+            snake.health = 80;
+        }
+        gs.you.health = 80;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Down);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
+    #[test]
     fn test_search_cutoff_enemy_01() {
         let mut gs = new_gamestate_from_text(
             "
@@ -1841,6 +1871,7 @@ pub mod tests {
         ",
         );
         gs.init();
+        gs.game.timeout = 1000;
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
         assert_eq!(search.best_direction, Direction::Up);
