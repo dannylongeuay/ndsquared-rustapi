@@ -5,4 +5,4 @@ resources:
   - deployment.yaml
 images:
   - name: dannylongeuay/ndsq-rustapi
-    newTag: 1.10.0
+    newTag: 1.11.0
