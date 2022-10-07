@@ -221,6 +221,7 @@ impl Board {
 #[derive(Debug)]
 pub struct TerritoryInfo {
     controlled_squares: HashMap<String, HashSet<Coord>>,
+    available_squares: HashMap<String, HashSet<Coord>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
@@ -260,6 +261,7 @@ pub struct GameState {
     /// Battlesnake Object describing your Battlesnake.
     you: Battlesnake,
 }
+
 fn in_bounds(coord: &Coord, width: i32, height: i32) -> bool {
     return coord.x >= 0 && coord.y >= 0 && coord.x < width && coord.y < height;
 }
@@ -494,41 +496,71 @@ impl GameState {
         }
         closest_distance
     }
+    // TODO: this is horribly innefficient
     fn compute_territory_info(&self) -> TerritoryInfo {
         let mut controlled_squares: HashMap<String, HashSet<Coord>> = HashMap::new();
+        let mut available_squares: HashMap<String, HashSet<Coord>> = HashMap::new();
         let mut nodes: VecDeque<(String, u32, Coord)> = VecDeque::new();
+        let mut distances: HashMap<Coord, u32> = HashMap::new();
         let mut visited: HashSet<Coord> = HashSet::new();
         for snake in &self.board.snakes {
             controlled_squares.insert(snake.id.clone(), HashSet::new());
             nodes.push_back((snake.id.clone(), 0, snake.head));
-            visited.insert(snake.head);
+            distances.insert(snake.head, 0);
             controlled_squares
                 .get_mut(&snake.id)
                 .unwrap()
                 .insert(snake.head);
         }
-        while !nodes.is_empty() {
-            let (owner, distance, current_coord) = nodes.pop_front().unwrap();
-            for (coord, _) in self.adjacent_moves(&current_coord) {
-                if !visited.contains(&coord) && self.viable(&coord) {
-                    let distance = distance + 1;
-                    nodes.push_back((owner.clone(), distance, coord));
-                    visited.insert(coord);
-                    controlled_squares.get_mut(&owner).unwrap().insert(coord);
+        while let Some((owner, distance, current_coord)) = nodes.pop_front() {
+            for (adj_coord, _dir) in self.adjacent_moves(&current_coord) {
+                if !self.viable(&adj_coord) {
+                    continue;
+                }
+                let dist_check = distances.get(&adj_coord);
+                let new_distance = distance + 1;
+                if dist_check.is_none() {
+                    nodes.push_back((owner.clone(), new_distance, adj_coord));
+                    distances.insert(adj_coord, new_distance);
+                    controlled_squares
+                        .get_mut(&owner)
+                        .unwrap()
+                        .insert(adj_coord);
+                } else if dist_check.is_some() && *dist_check.unwrap() == new_distance {
+                    // Squares are owned by all snakes that can reach them in the same distance
+                    controlled_squares
+                        .get_mut(&owner)
+                        .unwrap()
+                        .insert(adj_coord);
                 }
             }
         }
-        TerritoryInfo { controlled_squares }
+        for snake in &self.board.snakes {
+            nodes.clear();
+            visited.clear();
+            available_squares.insert(snake.id.clone(), HashSet::new());
+            nodes.push_back((snake.id.clone(), 0, snake.head));
+            visited.insert(snake.head);
+            available_squares
+                .get_mut(&snake.id)
+                .unwrap()
+                .insert(snake.head);
+            while let Some((_owner, distance, current_coord)) = nodes.pop_front() {
+                for (coord, _) in self.adjacent_moves(&current_coord) {
+                    if !visited.contains(&coord) && self.viable(&coord) {
+                        let distance = distance + 1;
+                        nodes.push_back((snake.id.clone(), distance, coord));
+                        visited.insert(coord);
+                        available_squares.get_mut(&snake.id).unwrap().insert(coord);
+                    }
+                }
+            }
+        }
+        TerritoryInfo {
+            controlled_squares,
+            available_squares,
+        }
     }
-}
-
-#[derive(Debug)]
-pub struct Search {
-    current_depth: u32,
-    advances: u32,
-    terminals: u32,
-    best_direction: Direction,
-    best_score: Score,
 }
 
 #[derive(Debug, Clone)]
@@ -536,9 +568,9 @@ pub struct Score {
     min: bool,
     max: bool,
     biggest: bool,
-    center_distance: i32,
-    tail_distance: i32,
-    food_distance: i32,
+    center_dist: i32,
+    tail_dist: i32,
+    food_dist: i32,
     length: i32,
     snake_stomps: i32,
     snake_avoids: i32,
@@ -552,9 +584,9 @@ impl Score {
             min: false,
             max: false,
             biggest: false,
-            center_distance: 0,
-            tail_distance: 0,
-            food_distance: 0,
+            center_dist: 0,
+            tail_dist: 0,
+            food_dist: 0,
             length: 0,
             snake_stomps: 0,
             snake_avoids: 0,
@@ -570,11 +602,11 @@ impl Score {
         }
         let mut result: i32 = 0;
         if self.biggest {
-            result += 100;
+            result += 1000;
         }
-        result += self.center_distance;
-        result += self.tail_distance;
-        result += self.food_distance;
+        result += self.center_dist;
+        result += self.tail_dist;
+        result += self.food_dist;
         result += self.length;
         result += self.snake_stomps;
         result += self.snake_avoids;
@@ -584,16 +616,29 @@ impl Score {
     }
 }
 
+#[derive(Debug)]
+pub struct Search {
+    current_depth: u32,
+    iteration_reached: u32,
+    advances: u32,
+    terminals: u32,
+    best_direction: Direction,
+    best_score: Score,
+    best_pv: Vec<Coord>,
+}
+
 impl Search {
     fn new(gs: &GameState) -> Self {
         let mut best_score = Score::new();
         best_score.min = true;
         Search {
             current_depth: 0,
+            iteration_reached: 1,
             advances: 0,
             terminals: 0,
             best_direction: gs.random_valid_move(&gs.you.head).1,
             best_score,
+            best_pv: Vec::new(),
         }
     }
     fn iterative_deepening(&mut self, gs: &GameState, max_depth: u32) {
@@ -601,7 +646,7 @@ impl Search {
         for i in 1..=max_depth {
             let moves: HashMap<String, Coord> = HashMap::new();
             let mut root_pv: Vec<Coord> = Vec::new();
-            let score = self.minimax_alphabeta(
+            let _score = self.minimax_alphabeta(
                 gs.clone(),
                 &gs.you.id,
                 gs.you.id.clone(),
@@ -612,24 +657,31 @@ impl Search {
                 moves.clone(),
                 &mut root_pv,
             );
-            info!("###################################################");
-            info!(
-                "Iterative Depth: {:?} | Advances: {:?} | Terminals: {:?} | Best Direction: {:?} | Best Score Sum: {:?}",
-                i, self.advances, self.terminals, self.best_direction, self.best_score.sum()
+            let debug_header = format!("{} Depth {:?} {}", "#".repeat(75), i, "#".repeat(25));
+            if i <= 20 {
+                debug!("\n{}", debug_header);
+                debug!(
+                "Advances: {:?} | Terminals: {:?} | Best Direction: {:?} | Best Score Sum: {:?}",
+                self.advances,
+                self.terminals,
+                self.best_direction,
+                self.best_score.sum()
             );
-            info!("Sum: {:?} | {:?}", score.sum(), score);
-            info!(
-                "Best Sum: {:?} | {:?}",
-                self.best_score.sum(),
-                self.best_score
-            );
-            info!("PV: {:?}", root_pv);
+                debug!("Sum: {:?}\n{:?}", _score.sum(), _score);
+                debug!(
+                    "Best Sum: {:?}\n{:?}",
+                    self.best_score.sum(),
+                    self.best_score
+                );
+                debug!("PV: {:?}\n{}", root_pv, "#".repeat(debug_header.len()));
+            }
             self.advances = 0;
             self.terminals = 0;
             self.current_depth = 0;
             if start.elapsed().as_millis() > gs.game.timeout as u128 - 50 {
                 break;
             }
+            self.iteration_reached = i;
         }
         if self.best_score.sum() == i32::MIN {}
     }
@@ -656,20 +708,20 @@ impl Search {
             return self.evaluate(&gs);
         }
         let snake = snake.unwrap();
-        let viable_moves: Vec<(Coord, Direction)> = gs
+        let mut viable_moves: Vec<(Coord, Direction)> = gs
             .adjacent_moves(&snake.head)
             .iter()
             .cloned()
             .filter(|(coord, _)| gs.viable(&coord))
             .collect();
-        // println!(
-        //     "Current Depth {:?} | Tree Depth {:?} | Current ID: {:?} | Viable Moves: {:?} | Pending Moves: {:?}",
-        //     self.current_depth,
-        //     depth,
-        //     current_id,
-        //     viable_moves,
-        //     pending_moves,
-        // );
+        trace!(
+            "Current Depth {:?} | Tree Depth {:?} | Current ID: {:?} | Viable Moves: {:?} | Pending Moves: {:?}",
+            self.current_depth,
+            depth,
+            current_id,
+            viable_moves,
+            pending_moves,
+        );
         let next_index = (gs.board.snake_indexes[&current_id] + 1) % gs.board.snakes.len();
         let next_id = gs.board.snakes[next_index].id.clone();
         let mut score = Score::new();
@@ -678,31 +730,34 @@ impl Search {
         } else {
             score.max = true;
         }
-        // TODO: how do we want to handle a snake not having a move?
+        // If a snake has no viable moves, we make a random move
         if viable_moves.len() == 0 {
-            return self.evaluate(&gs);
+            viable_moves.push(gs.random_valid_move(&snake.head));
         }
+
         for (coord, direction) in viable_moves {
             let mut node_pv: Vec<Coord> = Vec::new();
             let mut cloned_gs = gs.clone();
             pending_moves.insert(current_id.clone(), coord);
             // All snakes have made moves, so we advance the gamestate
             if pending_moves.len() == cloned_gs.board.snakes.len() {
-                // println!(
-                //     "Advanced > Current Depth {:?} | Tree Depth {:?} | Moves: {:?}",
-                //     self.current_depth, depth, pending_moves
-                // );
+                trace!(
+                    "Advanced > Current Depth {:?} | Tree Depth {:?} | Moves: {:?}",
+                    self.current_depth,
+                    depth,
+                    pending_moves
+                );
                 self.advances += 1;
                 cloned_gs.advance(&pending_moves);
                 // Remove the move that was just played and filter out any moves for eliminated snakes
                 pending_moves.remove(&current_id);
                 pending_moves.retain(|k, _| cloned_gs.board.snake_indexes.get(k).is_some());
             }
+            trace!(
+                    "DOWN > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
+                    self.current_depth, depth, score, alpha, beta, current_id, coord, direction
+                );
             if maximizer == &current_id {
-                // println!(
-                //     "DOWN > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
-                //     self.current_depth, depth, score, alpha, beta, current_id, coord, direction
-                // );
                 self.current_depth += 1;
                 let node_score = self.minimax_alphabeta(
                     cloned_gs,
@@ -718,27 +773,17 @@ impl Search {
                 if node_score.sum() > score.sum() {
                     score = node_score;
                 }
+                if score.sum() == i32::MAX {
+                    debug!("maxxing out!");
+                }
                 self.current_depth -= 1;
-                // println!(
-                //     "UP   > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
-                //     self.current_depth, depth, score, alpha, beta, current_id, coord, direction
-                // );
                 if score.sum() > alpha {
                     pv.clear();
                     pv.push(coord);
                     pv.append(&mut node_pv);
                     alpha = score.sum();
                 }
-                if alpha >= beta {
-                    // beta cutoff
-                    // println!("beta cutoff");
-                    break;
-                }
             } else {
-                // println!(
-                //     "DOWN > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
-                //     self.current_depth, depth, score, alpha, beta, current_id, coord, direction
-                // );
                 self.current_depth += 1;
                 let node_score = self.minimax_alphabeta(
                     cloned_gs,
@@ -755,31 +800,32 @@ impl Search {
                     score = node_score;
                 }
                 self.current_depth -= 1;
-                // println!(
-                //     "UP   > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
-                //     self.current_depth, depth, score, alpha, beta, current_id, coord, direction
-                // );
                 if score.sum() < beta {
                     beta = score.sum();
                 }
-                if beta <= alpha {
-                    // alpha cutoff
-                    // println!("beta cutoff");
-                    break;
-                }
             }
+            trace!(
+                    "UP   > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
+                    self.current_depth, depth, score, alpha, beta, current_id, coord, direction
+                );
             // If we run out of time, return before we attemp to set a new direction
             if start.elapsed().as_millis() > gs.game.timeout as u128 - 50 {
                 score.min = true;
                 return score;
             }
             if self.current_depth == 0 && self.advances > 0 && score.sum() > self.best_score.sum() {
-                // println!(
-                //     "Best Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
-                //     score, alpha, beta, current_id, coord, direction
-                // );
+                trace!(
+                    "New Best Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
+                    score, alpha, beta, current_id, coord, direction
+                );
                 self.best_direction = direction;
                 self.best_score = score.clone();
+                self.best_pv = pv.clone();
+            }
+            if maximizer == &current_id && alpha >= beta {
+                break;
+            } else if beta <= alpha {
+                break;
             }
         }
         score
@@ -793,12 +839,8 @@ impl Search {
             return score;
         }
 
-        let board_squares = gs.board.width * gs.board.height;
-
         // The closer we are to the center the better
-        if let Some(center_distance) = gs.shortest_distance(&gs.you.head, &gs.board.center()) {
-            score.center_distance = board_squares - center_distance as i32;
-        }
+        score.center_dist = -gs.you.head.manhattan_distance(&gs.board.center());
 
         // Penalize moving to where a bigger or equal snakes head might be
         // Incentivize moving to where a smaller snakes head might be
@@ -811,23 +853,32 @@ impl Search {
         // Maximize our "controlled" squares
         let territory_info = gs.compute_territory_info();
         if let Some(controlled_squares) = territory_info.controlled_squares.get(&gs.you.id) {
-            score.board_control = controlled_squares.len() as i32;
+            score.board_control = controlled_squares.len() as i32 * 10;
+        }
+
+        // Going into a dead end is bad
+        if let Some(available_squares) = territory_info.available_squares.get(&gs.you.id) {
+            if available_squares.len() < gs.you.length as usize + 1 {
+                score.board_control = -10000;
+            }
         }
 
         // Having a path to our own tail is good
         if let Some(tail_distance) =
             gs.shortest_distance(&gs.you.head, &gs.you.body.back().unwrap())
         {
-            score.tail_distance = board_squares - tail_distance as i32;
+            score.tail_dist = -(tail_distance as i32);
         }
 
         if let Some(food_distance) = gs.closest_food_distance(&gs.you.head) {
-            let food_mod: i32 = 10000 - gs.you.health * 100;
-            score.food_distance = board_squares - food_distance as i32 * food_mod;
+            let food_mod: i32 = 101 - gs.you.health;
+            score.food_dist = -(food_distance as i32) * food_mod;
+        } else if gs.you.health < 20 {
+            score.food_dist = -5000;
         }
 
         // Growing bigger is good
-        score.length = gs.you.length as i32 * 10;
+        score.length = gs.you.length as i32 * 100;
 
         // Being the biggest snake is good
         score.biggest = gs.board.snakes.iter().all(|s| {
@@ -838,7 +889,9 @@ impl Search {
         });
 
         // Other snakes being eliminated is good
-        score.snakes_eliminated = (gs.board.snakes.len() as i32 - 1) as i32 * -1000;
+        if gs.game.ruleset.name != GameMode::Solo && gs.board.snakes.len() == 1 {
+            score.max = true;
+        }
 
         score
     }
@@ -885,12 +938,17 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
     let mr = MoveResponse {
         direction: search.best_direction,
         shout: format!(
-            "MOVE: {:?} | SCORE: {:?}",
-            search.best_direction, search.best_score
+            "MOVE: {:?} | SCORE: {:?} | ITERATIONS: {:?} | PV LENGTH: {:?}",
+            search.best_direction,
+            search.best_score.sum(),
+            search.iteration_reached,
+            search.best_pv.len()
         ),
     };
 
     info!("{:?}", mr);
+    info!("{:?}", search.best_score);
+    info!("PV: {:?}", search.best_pv);
 
     mr
 }
@@ -906,6 +964,7 @@ pub fn end(gs: GameState) {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use test_log::test;
 
     fn new_gamestate_from_text(text: &str) -> GameState {
         let mut height: i32 = 0;
@@ -960,6 +1019,7 @@ pub mod tests {
         let mut snakes: Vec<Battlesnake> = Vec::new();
         let mut you: Option<Battlesnake> = None;
         for (owner, mut coords) in snake_bodies.clone() {
+            debug!("{:?}", owner.to_string());
             coords.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
             let (body, _): (VecDeque<Coord>, Vec<u32>) = coords.iter().cloned().unzip();
             let length: u32 = body.len() as u32;
@@ -1563,6 +1623,40 @@ pub mod tests {
         assert_eq!(dist.is_none(), true);
     }
     #[test]
+    fn test_territory_info_01() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |A5|A4|H |        
+        |  |Y0|  |A3|  |        
+        |  |Y1|Y4|A2|  |        
+        |  |Y2|Y3|A1|  |        
+        |  |  |F |A0|  |        
+        ",
+        );
+        let t_info = gs.compute_territory_info();
+        let controlled_squares = t_info.controlled_squares.get(&gs.you.id).unwrap();
+        assert_eq!(controlled_squares.len(), 9);
+        let available_squares = t_info.available_squares.get(&gs.you.id).unwrap();
+        assert_eq!(available_squares.len(), 12);
+    }
+    #[test]
+    fn test_territory_info_02() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |F |A4|A3|H |        
+        |  |Y0|  |A2|  |        
+        |  |Y1|Y4|A1|  |        
+        |  |Y2|Y3|A0|  |        
+        |  |  |F |  |  |        
+        ",
+        );
+        let t_info = gs.compute_territory_info();
+        let controlled_squares = t_info.controlled_squares.get(&gs.you.id).unwrap();
+        assert_eq!(controlled_squares.len(), 10);
+        let available_squares = t_info.available_squares.get(&gs.you.id).unwrap();
+        assert_eq!(available_squares.len(), 18);
+    }
+    #[test]
     fn test_closest_food_distance() {
         let gs = new_gamestate_from_text(
             "
@@ -1593,25 +1687,26 @@ pub mod tests {
         assert_eq!(search.best_direction, Direction::Up);
         // assert_eq!(search.best_score, 100);
     }
-    // #[test]
-    // fn test_search_solo() {
-    //     let mut gs = new_gamestate_from_text(
-    //         "
-    //     |  |F |  |  |H |
-    //     |  |Y0|  |  |  |
-    //     |  |Y1|  |  |  |
-    //     |  |Y2|  |  |  |
-    //     |  |  |F |  |  |
-    //     ",
-    //     );
-    //     gs.init();
-    //     let mut search = Search::new(&gs);
-    //     search.iterative_deepening(&gs, 100);
-    //     assert_eq!(search.best_direction, Direction::Up);
-    //     // assert_eq!(search.best_score, 100);
-    // }
     #[test]
-    fn test_search_choose_open_space() {
+    fn test_search_solo() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |F |  |  |H |
+        |  |Y0|  |  |  |
+        |  |Y1|  |  |  |
+        |  |Y2|  |  |  |
+        |  |  |F |  |  |
+        ",
+        );
+        gs.init();
+        gs.game.ruleset.name = GameMode::Solo;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_01() {
         let mut gs = new_gamestate_from_text(
             "
         |  |  |  |  |  |
@@ -1622,10 +1717,134 @@ pub mod tests {
         ",
         );
         gs.init();
+        gs.game.ruleset.name = GameMode::Solo;
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
         assert_eq!(search.best_direction, Direction::Up);
         // assert_eq!(search.best_score, 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_02() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |Y0|  |  |  |  |  |  |
+        |Y5|Y4|Y3|Y2|Y1|  |  |  |  |  |  |
+        |Y6|  |  |  |  |  |  |  |  |  |  |
+        |Y7|  |  |  |  |  |  |  |  |  |  |
+        |Y8|  |  |  |  |  |  |  |  |  |  |
+        |Y9|  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |F |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        gs.game.ruleset.name = GameMode::Solo;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_03() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |A1|A0|  |  |  |  |  |  |  |  |
+        |  |A2|  |  |  |  |  |  |  |  |  |
+        |  |A3|  |  |  |  |  |  |  |  |  |
+        |  |A4|A5|  |  |  |  |  |  |  |  |
+        |  |  |A6|  |  |  |  |  |  |  |  |
+        |  |  |A7|A8|A9|  |  |  |  |  |  |
+        |Y1|Y0|  |  |  |  |  |  |  |  |  |
+        |Y2|Y3|  |  |  |  |F |  |  |  |  |
+        |  |Y4|  |  |  |  |  |  |  |  |  |
+        |  |Y5|Y6|  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
+    #[test]
+    fn test_search_choose_open_space_04() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |A1|A0|  |  |  |  |  |  |  |  |
+        |  |A2|  |  |  |  |  |  |  |  |  |
+        |  |A3|  |  |  |  |  |  |  |  |  |
+        |  |A4|A5|  |  |  |  |  |  |  |  |
+        |  |  |A6|  |  |  |  |  |  |  |  |
+        |  |  |A7|A8|A9|  |  |  |  |  |  |
+        |Y1|Y0|  |  |  |  |  |  |  |  |  |
+        |Y2|Y3|  |  |  |  |F |  |  |  |  |
+        |  |Y4|  |  |  |  |  |  |  |  |  |
+        |  |Y5|Y6|  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        for snake in gs.board.snakes.iter_mut() {
+            if snake.id != gs.you.id {
+                continue;
+            }
+            snake.health = 10;
+        }
+        gs.you.health = 10;
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Right);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
+    #[test]
+    fn test_search_cutoff_enemy_01() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |Y0|F |  |  |  |  |  |  |  |  |
+        |A0|Y1|  |  |  |  |  |  |  |  |  |
+        |A1|Y2|  |  |  |  |  |  |  |  |  |
+        |A2|Y3|Y4|  |  |  |  |  |  |  |  |
+        |A3|A4|Y5|Y6|Y7|Y8|  |  |  |  |  |
+        |  |A5|A6|A7|A8|A9|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        assert_eq!(search.best_score.sum(), i32::MAX);
+    }
+    #[test]
+    fn test_search_cutoff_enemy_02() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |Y1|Y0|  |F |  |  |  |  |  |  |
+        |A0|Y2|  |  |  |  |  |  |  |  |  |
+        |A1|Y3|Y4|  |  |  |  |  |  |  |  |
+        |A2|A3|Y5|Y6|Y7|Y8|  |  |  |  |  |
+        |  |A4|A5|A6|A7|A8|  |  |  |  |  |
+        |  |  |  |  |  |A9|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Up);
+        assert_eq!(search.best_score.sum(), i32::MAX);
     }
     #[test]
     fn test_search_stomp() {
@@ -1659,7 +1878,7 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
         assert_eq!(search.best_direction, Direction::Up);
-        // assert_eq!(search.best_score, 100);
+        assert_eq!(search.best_score.sum(), i32::MAX);
     }
     #[test]
     fn test_search_avoid() {
@@ -1720,7 +1939,7 @@ pub mod tests {
         // assert_eq!(search.best_score, 100);
     }
     #[test]
-    fn test_search_inveitable_loss() {
+    fn test_search_inveitable_loss_01() {
         let mut gs = new_gamestate_from_text(
             "
         |  |  |  |  |  |
@@ -1741,6 +1960,29 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
         assert_eq!(search.best_direction, Direction::Right);
+        assert_eq!(search.best_score.sum(), i32::MIN);
+    }
+    #[test]
+    fn test_search_meeting_of_the_minds() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |B3|B4|  |  |  |  |
+        |  |  |  |  |  |B2|  |  |  |  |  |
+        |  |  |  |  |  |B1|  |  |  |  |  |
+        |  |  |  |  |  |B0|  |  |  |  |  |
+        |  |Y3|Y2|Y1|Y0|F |C0|C1|C2|C3|C4|
+        |  |  |  |  |  |A0|  |  |  |  |C5|
+        |  |  |  |  |  |A1|  |  |  |  |  |
+        |  |  |  |  |  |A2|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Down);
         // assert_eq!(search.best_score, 100);
     }
 }
