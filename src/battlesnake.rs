@@ -627,6 +627,7 @@ pub struct Search {
     best_direction: Direction,
     best_score: Score,
     best_pv: Vec<Coord>,
+    search_time: u128,
 }
 
 impl Search {
@@ -641,6 +642,7 @@ impl Search {
             best_direction: gs.random_valid_move(&gs.you.head).1,
             best_score,
             best_pv: Vec::new(),
+            search_time: 0,
         }
     }
     fn iterative_deepening(&mut self, gs: &GameState, max_depth: u32) {
@@ -680,12 +682,12 @@ impl Search {
             self.advances = 0;
             self.terminals = 0;
             self.current_depth = 0;
-            if start.elapsed().as_millis() > gs.game.timeout as u128 - 50 {
+            if start.elapsed().as_millis() > gs.game.timeout as u128 - 100 {
                 break;
             }
             self.iteration_reached = i;
         }
-        if self.best_score.sum() == i32::MIN {}
+        self.search_time = start.elapsed().as_millis();
     }
 
     fn minimax_alphabeta(
@@ -700,15 +702,30 @@ impl Search {
         mut pending_moves: HashMap<String, Coord>,
         pv: &mut Vec<Coord>,
     ) -> Score {
+        let mut score = Score::new();
+
+        if maximizer == &current_id {
+            score.min = true;
+        } else {
+            score.max = true;
+        }
+
+        if start.elapsed().as_millis() > gs.game.timeout as u128 - 100 {
+            score.min = true;
+            return score;
+        }
+
         if depth == 0 {
             self.terminals += 1;
             return self.evaluate(&gs);
         }
+
         let snake = gs.board.get_snake(&current_id);
         if snake.is_none() {
             self.terminals += 1;
             return self.evaluate(&gs);
         }
+
         let snake = snake.unwrap();
         let mut viable_moves: Vec<(Coord, Direction)> = gs
             .adjacent_moves(&snake.head)
@@ -724,14 +741,10 @@ impl Search {
             viable_moves,
             pending_moves,
         );
+
         let next_index = (gs.board.snake_indexes[&current_id] + 1) % gs.board.snakes.len();
         let next_id = gs.board.snakes[next_index].id.clone();
-        let mut score = Score::new();
-        if maximizer == &current_id {
-            score.min = true;
-        } else {
-            score.max = true;
-        }
+
         // If a snake has no viable moves, we make a random move
         if viable_moves.len() == 0 {
             viable_moves.push(gs.random_valid_move(&snake.head));
@@ -808,7 +821,7 @@ impl Search {
                     self.current_depth, depth, score, alpha, beta, current_id, coord, direction
                 );
             // If we run out of time, return before we attemp to set a new direction
-            if start.elapsed().as_millis() > gs.game.timeout as u128 - 50 {
+            if start.elapsed().as_millis() > gs.game.timeout as u128 - 100 {
                 score.min = true;
                 return score;
             }
@@ -937,9 +950,10 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
     let mr = MoveResponse {
         direction: search.best_direction,
         shout: format!(
-            "MOVE: {:?} | SCORE: {:?} | ITERATIONS: {:?} | PV LENGTH: {:?}",
+            "MOVE: {:?} | SCORE: {:?} | TIME: {:?} | ITERATIONS: {:?} | PV LENGTH: {:?}",
             search.best_direction,
             search.best_score.sum(),
+            search.search_time,
             search.iteration_reached,
             search.best_pv.len()
         ),
