@@ -413,13 +413,13 @@ impl GameState {
                 if self.you.id == snake.id {
                     continue;
                 }
-                if i != 0 {
+                if i != 1 {
                     continue;
                 }
                 if self.you.length <= snake.length {
-                    avoids.extend(self.adjacent_moves(&snake.head).iter().map(|&t| t.0));
+                    avoids.extend(self.adjacent_moves(&coord).iter().map(|&t| t.0));
                 } else {
-                    stomps.extend(self.adjacent_moves(&snake.head).iter().map(|&t| t.0));
+                    stomps.extend(self.adjacent_moves(&coord).iter().map(|&t| t.0));
                 }
             }
         }
@@ -585,7 +585,6 @@ impl GameState {
 pub struct Score {
     min: bool,
     max: bool,
-    biggest: bool,
     center_dist: i32,
     tail_dist: i32,
     food_dist: i32,
@@ -593,7 +592,6 @@ pub struct Score {
     snake_stomps: i32,
     snake_avoids: i32,
     board_control: i32,
-    snakes_eliminated: i32,
 }
 
 impl Score {
@@ -601,7 +599,6 @@ impl Score {
         Score {
             min: false,
             max: false,
-            biggest: false,
             center_dist: 0,
             tail_dist: 0,
             food_dist: 0,
@@ -609,7 +606,6 @@ impl Score {
             snake_stomps: 0,
             snake_avoids: 0,
             board_control: 0,
-            snakes_eliminated: 0,
         }
     }
     fn sum(&self) -> i32 {
@@ -619,9 +615,6 @@ impl Score {
             return i32::MAX;
         }
         let mut result: i32 = 0;
-        if self.biggest {
-            result += 1000;
-        }
         result += self.center_dist;
         result += self.tail_dist;
         result += self.food_dist;
@@ -629,7 +622,6 @@ impl Score {
         result += self.snake_stomps;
         result += self.snake_avoids;
         result += self.board_control;
-        result += self.snakes_eliminated;
         result
     }
 }
@@ -644,6 +636,7 @@ pub struct Search {
     best_score: Score,
     best_pv: Vec<Coord>,
     search_time: u128,
+    timeout: u128,
 }
 
 impl Search {
@@ -659,6 +652,7 @@ impl Search {
             best_score,
             best_pv: Vec::new(),
             search_time: 0,
+            timeout: 425,
         }
     }
     fn iterative_deepening(&mut self, gs: &GameState, max_depth: u32) {
@@ -695,17 +689,19 @@ impl Search {
                 );
                 debug!("PV: {:?}\n{}", root_pv, "#".repeat(debug_header.len()));
             }
+            if self.time_check(start) {
+                break;
+            }
             self.advances = 0;
             self.terminals = 0;
             self.current_depth = 0;
-            if start.elapsed().as_millis() > gs.game.timeout as u128 - 100 {
-                break;
-            }
             self.iteration_reached = i;
         }
         self.search_time = start.elapsed().as_millis();
     }
-
+    fn time_check(&self, start: Instant) -> bool {
+        start.elapsed().as_millis() > self.timeout
+    }
     fn minimax_alphabeta(
         &mut self,
         gs: GameState,
@@ -726,7 +722,7 @@ impl Search {
             score.max = true;
         }
 
-        if start.elapsed().as_millis() > gs.game.timeout as u128 - 100 {
+        if self.time_check(start) {
             score.min = true;
             return score;
         }
@@ -836,11 +832,6 @@ impl Search {
                     "UP   > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
                     self.current_depth, depth, score, alpha, beta, current_id, coord, direction
                 );
-            // If we run out of time, return before we attemp to set a new direction
-            if start.elapsed().as_millis() > gs.game.timeout as u128 - 100 {
-                score.min = true;
-                return score;
-            }
             if self.current_depth == 0 && self.advances > 0 && score.sum() > self.best_score.sum() {
                 trace!(
                     "New Best Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
@@ -896,25 +887,19 @@ impl Search {
             gs.shortest_distance(&gs.you.head, &gs.you.body.back().unwrap())
         {
             score.tail_dist = -(tail_distance as i32);
+        } else {
+            score.tail_dist = -1000;
         }
 
+        // Prioritize moving towards food
         if let Some(food_distance) = gs.closest_food_distance(&gs.you.head) {
-            let food_mod: i32 = 101 - gs.you.health;
-            score.food_dist = -(food_distance as i32) * food_mod;
+            score.food_dist = (1.0 / food_distance as f32 * 100.0) as i32;
         } else if gs.you.health < 20 {
             score.food_dist = -5000;
         }
 
         // Growing bigger is good
-        score.length = gs.you.length as i32 * 100;
-
-        // Being the biggest snake is good
-        score.biggest = gs.board.snakes.iter().all(|s| {
-            if s.id == gs.you.id {
-                return true;
-            }
-            s.length < gs.you.length
-        });
+        score.length = gs.you.length as i32 * 1000;
 
         // Other snakes being eliminated is good
         if gs.game.ruleset.name != GameMode::Solo && gs.board.snakes.len() == 1 {
@@ -1953,7 +1938,7 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
         assert_eq!(search.best_direction, Direction::Right);
-        // assert_eq!(search.best_score, 100);
+        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_stomp_trapped() {
@@ -1987,7 +1972,7 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
         assert_eq!(search.best_direction, Direction::Left);
-        // assert_eq!(search.best_score, 100);
+        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_avoid_with_food() {
@@ -2004,7 +1989,7 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&gs, 100);
         assert_eq!(search.best_direction, Direction::Left);
-        // assert_eq!(search.best_score, 100);
+        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_avoid_with_food_while_starving() {

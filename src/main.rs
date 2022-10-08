@@ -2,7 +2,9 @@
 extern crate rocket;
 
 use rocket::http::Status;
+use rocket::response::Debug;
 use rocket::serde::json::Json;
+use rocket::tokio::task::{spawn_blocking, JoinError};
 use rocket_okapi::{openapi, openapi_get_routes, swagger_ui::*};
 use std::env;
 
@@ -32,8 +34,11 @@ fn handle_start(gs: Json<battlesnake::GameState>) -> Status {
 /// This request will be sent for every turn of the game. Use the information provided to determine how your Battlesnake will move on that turn, either up, down, left, or right.
 #[openapi(tag = "Battlesnake")]
 #[post("/move", format = "json", data = "<gs>")]
-fn handle_move(gs: Json<battlesnake::GameState>) -> Json<battlesnake::MoveResponse> {
-    Json(battlesnake::make_move(gs.into_inner()))
+async fn handle_move(
+    gs: Json<battlesnake::GameState>,
+) -> Result<Json<battlesnake::MoveResponse>, Debug<JoinError>> {
+    let result = spawn_blocking(move || Json(battlesnake::make_move(gs.into_inner()))).await?;
+    Ok(result)
 }
 
 /// # Game End

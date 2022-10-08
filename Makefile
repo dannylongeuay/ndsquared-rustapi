@@ -36,11 +36,15 @@ play-solo: ## Play a solo game locally
 play-solo-browser: ## Play a solo game locally, then open the replay in the browser
 	battlesnake play --name solo_snake --url "http://localhost:8000" -g solo --browser
 
+.PHONY: play-local-browser
+play-local-browser: ## Play a game locally, then open the replay in the browser
+	battlesnake play --name local_snake_1 --url "http://localhost:8000" --name local_snake_2 --url "http://localhost:8000" --browser
+
 .PHONY: play-live
 play-live: ## Play a versus game against the live version
-	battlesnake play --name live_snake --url "http://rustapi.ndsquared.net" --name local_snake --url "http://localhost:8000" -v
+	battlesnake play --name live_snake --url "http://rustapi.ndsquared.net" --name local_snake --url "http://localhost:8000" -v -t 700
 
 .PHONY: play-live-browser
 play-live-browser: ## Play a versus game against the live version, then open the replay in the browser
-	battlesnake play --name live_snake --url "http://rustapi.ndsquared.net" --name local_snake --url "http://localhost:8000" --browser
+	battlesnake play --name live_snake --url "http://rustapi.ndsquared.net" --name local_snake --url "http://localhost:8000" --browser -t 700
 
