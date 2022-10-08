@@ -185,12 +185,15 @@ pub struct Board {
     /// Array of coordinates representing food locations on the game board. Example: [{"x": 5, "y": 5}, ..., {"x": 2, "y": 6}]
     food: HashSet<Coord>,
     /// Array of coordinates representing hazardous locations on the game board. These will only appear in some game modes. Example: [{"x": 0, "y": 0}, ..., {"x": 0, "y": 1}]
-    hazards: HashSet<Coord>,
+    hazards: Vec<Coord>,
     /// Array of Battlesnake Objects representing all Battlesnakes remaining on the game board (including yourself if you haven't been eliminated). Example: [{"id": "snake-one", ...}, ...]
     snakes: Vec<Battlesnake>,
     /// Set of coords for all snake's bodies minus tails.
     #[serde(skip)]
     obstacles: HashSet<Coord>,
+    /// Mapping of hazard coordinates and their corresponding damage.
+    #[serde(skip)]
+    hazard_damage: HashMap<Coord, i32>,
     /// Set of coords adjacent to enemy snake heads that are smaller in size.
     #[serde(skip)]
     stomps: HashSet<Coord>,
@@ -288,8 +291,8 @@ impl GameState {
                 snake.health = 100;
                 snake.body.push_back(snake.body.back().unwrap().clone());
                 eaten_food.insert(snake.head);
-            } else if self.board.hazards.contains(&snake.head) {
-                snake.health -= self.game.ruleset.settings.hazard_damage_per_turn;
+            } else if let Some(damage) = self.board.hazard_damage.get(&snake.head) {
+                snake.health -= damage;
             }
             snake.length = snake.body.len() as u32;
             snake_heads.insert(snake.id.clone(), (snake.head, snake.length));
@@ -305,6 +308,7 @@ impl GameState {
         for food in &eaten_food {
             self.board.food.remove(food);
         }
+
         // TODO: Add new food?
         // TODO: Add royale hazards?
 
@@ -396,6 +400,7 @@ impl GameState {
     }
     fn compute_metadata(&mut self) {
         let mut obstacles: HashSet<Coord> = HashSet::new();
+        let mut hazard_damage: HashMap<Coord, i32> = HashMap::new();
         let mut stomps: HashSet<Coord> = HashSet::new();
         let mut avoids: HashSet<Coord> = HashSet::new();
         let mut snake_indexes: HashMap<String, usize> = HashMap::new();
@@ -418,11 +423,22 @@ impl GameState {
                 }
             }
         }
-        if self.game.ruleset.settings.hazard_damage_per_turn >= self.you.health {
-            obstacles.extend(self.board.hazards.clone());
+        for hazard in &self.board.hazards {
+            let mut total_damage: i32 = self.game.ruleset.settings.hazard_damage_per_turn;
+            if let Some(damage) = hazard_damage.get_mut(&hazard) {
+                *damage += total_damage;
+                total_damage = damage.clone();
+            } else {
+                hazard_damage.insert(hazard.clone(), total_damage);
+            }
+            if total_damage >= self.you.health {
+                obstacles.insert(hazard.clone());
+            }
         }
+
         self.board.snake_indexes = snake_indexes;
         self.board.obstacles = obstacles;
+        self.board.hazard_damage = hazard_damage;
         self.board.stomps = stomps;
         self.board.avoids = avoids;
     }
@@ -985,7 +1001,7 @@ pub mod tests {
         let mut y = 0;
         let mut snake_bodies: HashMap<char, Vec<(Coord, u32)>> = HashMap::new();
         let mut food: HashSet<Coord> = HashSet::new();
-        let mut hazards: HashSet<Coord> = HashSet::new();
+        let mut hazards: Vec<Coord> = Vec::new();
         for row in text.lines().map(str::trim).rev() {
             if !row.starts_with("|") {
                 continue;
@@ -1001,14 +1017,18 @@ pub mod tests {
                 let chars: Vec<char> = split.chars().collect();
                 match chars[0] {
                     'H' => {
-                        hazards.insert(coord);
+                        hazards.push(coord);
                     }
                     'F' => {
                         food.insert(coord);
                     }
                     'Z' => {
-                        hazards.insert(coord);
+                        hazards.push(coord);
                         food.insert(coord);
+                    }
+                    'G' => {
+                        hazards.push(coord);
+                        hazards.push(coord);
                     }
                     ' ' => {}
                     _ => {
@@ -1089,6 +1109,7 @@ pub mod tests {
             hazards,
             snakes,
             obstacles: HashSet::new(),
+            hazard_damage: HashMap::new(),
             stomps: HashSet::new(),
             avoids: HashSet::new(),
             snake_indexes: HashMap::new(),
@@ -1127,8 +1148,14 @@ pub mod tests {
         assert_eq!(*snake.body.back().unwrap(), Coord { x: 3, y: 3 });
         assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
         assert_eq!(gs.board.food.contains(&Coord { x: 0, y: 4 }), true);
-        assert_eq!(gs.board.hazards.contains(&Coord { x: 4, y: 4 }), true);
-        assert_eq!(gs.board.hazards.contains(&Coord { x: 0, y: 4 }), true);
+        assert_eq!(
+            gs.board.hazard_damage.contains_key(&Coord { x: 4, y: 4 }),
+            true
+        );
+        assert_eq!(
+            gs.board.hazard_damage.contains_key(&Coord { x: 0, y: 4 }),
+            true
+        );
     }
     #[test]
     fn test_gamestate_cloning() {
@@ -1178,7 +1205,10 @@ pub mod tests {
         assert_eq!(snake.head, Coord { x: 3, y: 0 });
         assert_eq!(*snake.body.back().unwrap(), Coord { x: 3, y: 2 });
         assert_eq!(gs.board.food.contains(&Coord { x: 2, y: 0 }), true);
-        assert_eq!(gs.board.hazards.contains(&Coord { x: 4, y: 4 }), true);
+        assert_eq!(
+            gs.board.hazard_damage.contains_key(&Coord { x: 4, y: 4 }),
+            true
+        );
     }
     #[test]
     fn test_advance_food() {
@@ -1376,6 +1406,23 @@ pub mod tests {
         gs.advance(&moves);
         assert_eq!(gs.board.snakes.len(), 1);
         assert_eq!(gs.you.health, 84);
+    }
+    #[test]
+    fn test_advance_hazard_double() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |        
+        |G |Y0|Y1|Y2|  |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        |  |  |  |  |  |        
+        ",
+        );
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 0, y: 3 });
+        gs.advance(&moves);
+        assert_eq!(gs.board.snakes.len(), 1);
+        assert_eq!(gs.you.health, 69);
     }
     #[test]
     fn test_advance_hazard_death() {
