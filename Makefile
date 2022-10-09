@@ -9,8 +9,8 @@ asdf-bootstrap: ## Bootstrap tooling dependencies
 	asdf plugin-add rust || asdf install rust
 
 .PHONY: run
-run: asdf-bootstrap ## Run the rust binary
-	cargo run
+run: asdf-bootstrap ## Run the rust binary in release mode
+	cargo run --release
 
 .PHONY: build
 build: asdf-bootstrap ## Build the rust binary
