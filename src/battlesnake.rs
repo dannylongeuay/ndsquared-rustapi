@@ -224,7 +224,7 @@ impl Board {
 #[derive(Debug)]
 pub struct TerritoryInfo {
     controlled_squares: HashMap<String, HashSet<Coord>>,
-    available_squares: HashMap<String, HashSet<Coord>>,
+    available_squares: HashSet<Coord>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
@@ -517,7 +517,7 @@ impl GameState {
     // TODO: this is horribly innefficient
     fn compute_territory_info(&self) -> TerritoryInfo {
         let mut controlled_squares: HashMap<String, HashSet<Coord>> = HashMap::new();
-        let mut available_squares: HashMap<String, HashSet<Coord>> = HashMap::new();
+        let mut available_squares: HashSet<Coord> = HashSet::new();
         let mut nodes: VecDeque<(String, u32, Coord)> = VecDeque::new();
         let mut visited: HashMap<Coord, (String, u32)> = HashMap::new();
         for snake in &self.board.snakes {
@@ -562,32 +562,23 @@ impl GameState {
                     .insert(adj_coord);
             }
         }
-        for snake in &self.board.snakes {
-            nodes.clear();
-            visited.clear();
-            available_squares.insert(snake.id.clone(), HashSet::new());
-            nodes.push_back((snake.id.clone(), 0, snake.head));
-            visited.insert(snake.head, (snake.id.clone(), 0));
-            available_squares
-                .get_mut(&snake.id)
-                .unwrap()
-                .insert(snake.head);
-            while let Some((owner, distance, current_coord)) = nodes.pop_front() {
-                for (adj_coord, _) in self.adjacent_moves(&current_coord) {
-                    if !self.viable(&adj_coord) {
-                        continue;
-                    }
-                    if visited.contains_key(&adj_coord) {
-                        continue;
-                    }
-                    let new_distance = distance + 1;
-                    nodes.push_back((snake.id.clone(), new_distance, adj_coord));
-                    visited.insert(adj_coord, (owner.clone(), new_distance));
-                    available_squares
-                        .get_mut(&snake.id)
-                        .unwrap()
-                        .insert(adj_coord);
+        nodes.clear();
+        visited.clear();
+        nodes.push_back((self.you.id.clone(), 0, self.you.head));
+        visited.insert(self.you.head, (self.you.id.clone(), 0));
+        available_squares.insert(self.you.head);
+        while let Some((owner, distance, current_coord)) = nodes.pop_front() {
+            for (adj_coord, _) in self.adjacent_moves(&current_coord) {
+                if !self.viable(&adj_coord) {
+                    continue;
                 }
+                if visited.contains_key(&adj_coord) {
+                    continue;
+                }
+                let new_distance = distance + 1;
+                nodes.push_back((self.you.id.clone(), new_distance, adj_coord));
+                visited.insert(adj_coord, (owner.clone(), new_distance));
+                available_squares.insert(adj_coord);
             }
         }
         TerritoryInfo {
@@ -676,7 +667,7 @@ impl Search {
         for i in 1..=max_depth {
             let moves: HashMap<String, Coord> = HashMap::new();
             let mut root_pv: Vec<Coord> = Vec::new();
-            let _score = self.minimax_alphabeta(
+            let score = self.minimax_alphabeta(
                 gs.clone(),
                 &gs.you.id,
                 gs.you.id.clone(),
@@ -697,7 +688,7 @@ impl Search {
                 self.best_direction,
                 self.best_score.sum()
             );
-                debug!("Sum: {:?}\n{:?}", _score.sum(), _score);
+                debug!("Sum: {:?}\n{:?}", score.sum(), score);
                 debug!(
                     "Best Sum: {:?}\n{:?}",
                     self.best_score.sum(),
@@ -708,12 +699,18 @@ impl Search {
             if self.time_check(start) {
                 break;
             }
+            if score.sum() > self.best_score.sum() && self.advances > 0 {
+                self.best_score = score;
+            }
             self.advances = 0;
             self.terminals = 0;
             self.current_depth = 0;
             self.iteration_reached = i;
         }
         self.search_time = start.elapsed().as_millis();
+        if self.best_score.sum() == i32::MIN {
+            warn!("unable to find a move!");
+        }
     }
     fn time_check(&self, start: Instant) -> bool {
         start.elapsed().as_millis() > self.timeout
@@ -813,10 +810,21 @@ impl Search {
                     pending_moves.clone(),
                     &mut node_pv,
                 );
+                self.current_depth -= 1;
                 if node_score.sum() > score.sum() {
                     score = node_score;
+                    if self.current_depth == 0
+                        && self.advances > 0
+                        && score.sum() > self.best_score.sum()
+                    {
+                        trace!(
+                    "New Best Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
+                    score, alpha, beta, current_id, coord, direction
+                );
+                        self.best_direction = direction;
+                        self.best_pv = pv.clone();
+                    }
                 }
-                self.current_depth -= 1;
                 if score.sum() > alpha {
                     pv.clear();
                     pv.push(coord);
@@ -848,15 +856,6 @@ impl Search {
                     "UP   > Current Depth {:?} | Tree Depth {:?} | Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
                     self.current_depth, depth, score, alpha, beta, current_id, coord, direction
                 );
-            if self.current_depth == 0 && self.advances > 0 && score.sum() > self.best_score.sum() {
-                trace!(
-                    "New Best Score: {:?} | A: {:?} | B: {:?} | Current ID: {:?} | Coord: {:?} | Move: {:?}",
-                    score, alpha, beta, current_id, coord, direction
-                );
-                self.best_direction = direction;
-                self.best_score = score.clone();
-                self.best_pv = pv.clone();
-            }
             if maximizer == &current_id && alpha >= beta {
                 break;
             } else if beta <= alpha {
@@ -892,10 +891,8 @@ impl Search {
         }
 
         // Going into a dead end is bad
-        if let Some(available_squares) = territory_info.available_squares.get(&gs.you.id) {
-            if available_squares.len() < gs.you.length as usize + 1 {
-                score.board_control = -10000;
-            }
+        if territory_info.available_squares.len() < gs.you.length as usize + 1 {
+            score.board_control = -10000;
         }
 
         // Having a path to our own tail is good
@@ -909,13 +906,13 @@ impl Search {
 
         // Prioritize moving towards food
         if let Some(food_distance) = gs.closest_food_distance(&gs.you.head) {
-            score.food_dist = (1.0 / food_distance as f32 * 1000.0) as i32;
+            score.food_dist = ((1.0 / food_distance as f32 * 10000.0) as i32).clamp(0, 9999);
         } else if gs.you.health < 20 {
             score.food_dist = -5000;
         }
 
         // Growing bigger is good
-        score.length = gs.you.length as i32 * 1000;
+        score.length = gs.you.length as i32 * 10000;
 
         // Other snakes being eliminated is good
         if gs.game.ruleset.name != GameMode::Solo && gs.board.snakes.len() == 1 {
@@ -1731,8 +1728,7 @@ pub mod tests {
         let t_info = gs.compute_territory_info();
         let controlled_squares = t_info.controlled_squares.get(&gs.you.id).unwrap();
         assert_eq!(controlled_squares.len(), 9);
-        let available_squares = t_info.available_squares.get(&gs.you.id).unwrap();
-        assert_eq!(available_squares.len(), 12);
+        assert_eq!(t_info.available_squares.len(), 12);
     }
     #[test]
     fn test_territory_info_02() {
@@ -1748,8 +1744,7 @@ pub mod tests {
         let t_info = gs.compute_territory_info();
         let controlled_squares = t_info.controlled_squares.get(&gs.you.id).unwrap();
         assert_eq!(controlled_squares.len(), 9);
-        let available_squares = t_info.available_squares.get(&gs.you.id).unwrap();
-        assert_eq!(available_squares.len(), 18);
+        assert_eq!(t_info.available_squares.len(), 18);
     }
     #[test]
     fn test_closest_food_distance() {
@@ -2161,28 +2156,78 @@ pub mod tests {
             }
         }
     }
-    // #[test]
-    // fn test_search_start_with_advance() {
-    //     let mut gs = new_gamestate_from_text(
-    //         "
-    //     |  |  |  |  |F |  |  |  |  |  |  |
-    //     |  |  |  |  |  |SB|  |  |  |  |  |
-    //     |  |  |  |  |  |  |  |  |  |  |  |
-    //     |  |  |  |  |  |  |  |  |  |  |  |
-    //     |  |  |  |  |  |  |  |  |  |  |F |
-    //     |  |SA|  |  |  |F |  |  |  |SC|  |
-    //     |F |  |  |  |  |  |  |  |  |  |  |
-    //     |  |  |  |  |  |  |  |  |  |  |  |
-    //     |  |  |  |  |  |  |  |  |  |  |  |
-    //     |  |  |  |  |  |SY|  |  |  |  |  |
-    //     |  |  |  |  |F |  |  |  |  |  |  |
-    //     ",
-    //     );
-    //     gs.init();
-    //     let mut search = Search::new(&gs);
-    //     search.timeout = 1000;
-    //     search.iterative_deepening(&gs, 100);
-    //     assert_eq!(search.best_direction, Direction::Down);
-    //     assert_eq!(search.best_score.sum(), 100);
-    // }
+    #[test]
+    fn test_eval_start_with_advance() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |F |  |  |  |  |  |  |
+        |  |  |  |  |  |SB|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |F |
+        |  |SA|  |  |  |F |  |  |  |SC|  |
+        |F |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |SY|  |  |  |  |  |
+        |  |  |  |  |F |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let search = Search::new(&gs);
+        let score_0 = search.evaluate(&gs);
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 5, y: 0 });
+        moves.insert("A".to_owned(), Coord { x: 0, y: 5 });
+        moves.insert("B".to_owned(), Coord { x: 5, y: 10 });
+        moves.insert("C".to_owned(), Coord { x: 10, y: 5 });
+        gs.advance(&moves);
+        let search = Search::new(&gs);
+        let score_1 = search.evaluate(&gs);
+        assert_eq!(score_1.sum() > score_0.sum(), true);
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 4, y: 0 });
+        moves.insert("A".to_owned(), Coord { x: 0, y: 4 });
+        moves.insert("B".to_owned(), Coord { x: 4, y: 10 });
+        moves.insert("C".to_owned(), Coord { x: 10, y: 6 });
+        gs.advance(&moves);
+        let search = Search::new(&gs);
+        let score_2 = search.evaluate(&gs);
+        assert_eq!(score_2.sum() > score_1.sum(), true);
+        // assert_eq!(score_2.sum(), 100);
+    }
+    #[test]
+    fn test_search_start_with_advance() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |F |  |  |  |  |  |  |
+        |  |  |  |  |  |SB|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |F |
+        |  |SA|  |  |  |F |  |  |  |SC|  |
+        |F |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |SY|  |  |  |  |  |
+        |  |  |  |  |F |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut search = Search::new(&gs);
+        search.timeout = 1000;
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Down);
+        let mut moves: HashMap<String, Coord> = HashMap::new();
+        moves.insert("Y".to_owned(), Coord { x: 5, y: 0 });
+        moves.insert("A".to_owned(), Coord { x: 0, y: 5 });
+        moves.insert("B".to_owned(), Coord { x: 5, y: 10 });
+        moves.insert("C".to_owned(), Coord { x: 10, y: 5 });
+        gs.advance(&moves);
+        search = Search::new(&gs);
+        search.timeout = 1000;
+        search.iterative_deepening(&gs, 100);
+        assert_eq!(search.best_direction, Direction::Left);
+        // assert_eq!(search.best_score.sum(), 100);
+    }
 }
