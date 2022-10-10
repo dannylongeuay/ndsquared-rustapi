@@ -714,7 +714,6 @@ impl Score {
     }
 }
 
-#[derive(Debug)]
 pub struct Search {
     tree_depth: u32,
     move_depth: i32,
@@ -728,6 +727,7 @@ pub struct Search {
     search_time: u128,
     timeout: u128,
     snake_order: Vec<String>,
+    evaluate_fn: fn(&GameState, i32) -> Score,
 }
 
 impl Search {
@@ -742,6 +742,10 @@ impl Search {
             }
             move_order.push(snake.id.clone());
         }
+        let mut evaluate_fn: fn(&GameState, i32) -> Score = territory_evaluate;
+        if gs.board.snakes.len() > 4 {
+            evaluate_fn = basic_evaluate;
+        }
         Search {
             tree_depth: 0,
             move_depth: 0,
@@ -755,6 +759,7 @@ impl Search {
             search_time: 0,
             timeout: 425,
             snake_order: move_order,
+            evaluate_fn,
         }
     }
     fn iterative_deepening(&mut self, gs: &mut GameState, max_depth: u32) {
@@ -983,7 +988,7 @@ impl Search {
         score
     }
     fn evaluate(&self, gs: &GameState) -> Score {
-        basic_evaluate(gs, self.move_depth)
+        (self.evaluate_fn)(gs, self.move_depth)
     }
 }
 
@@ -1039,7 +1044,7 @@ fn basic_evaluate(gs: &GameState, depth: i32) -> Score {
     score
 }
 
-fn territory_evaluate(gs: &GameState) -> Score {
+fn territory_evaluate(gs: &GameState, depth: i32) -> Score {
     let mut score = Score::new();
     // Elimination is bad
     if gs.you.eliminated {
@@ -1092,7 +1097,7 @@ fn territory_evaluate(gs: &GameState) -> Score {
     score.length = gs.you.length as i32 * 10000;
 
     // The longer we survive, the better
-    score.survival = gs.you.health * 100;
+    score.survival = depth * 10000 + gs.you.health * 100;
 
     score
 }
@@ -2610,7 +2615,7 @@ pub mod tests {
         ",
         );
         gs.init();
-        let score_0 = territory_evaluate(&gs);
+        let score_0 = territory_evaluate(&gs, 0);
         let moves: Vec<(String, Coord)> = vec![
             ("Y".to_owned(), Coord { x: 5, y: 0 }),
             ("A".to_owned(), Coord { x: 0, y: 5 }),
@@ -2618,7 +2623,7 @@ pub mod tests {
             ("C".to_owned(), Coord { x: 10, y: 5 }),
         ];
         gs.advance(&moves);
-        let score_1 = territory_evaluate(&gs);
+        let score_1 = territory_evaluate(&gs, 1);
         assert_eq!(score_1.sum() > score_0.sum(), true);
         let moves: Vec<(String, Coord)> = vec![
             ("Y".to_owned(), Coord { x: 4, y: 0 }),
@@ -2627,7 +2632,7 @@ pub mod tests {
             ("C".to_owned(), Coord { x: 10, y: 6 }),
         ];
         gs.advance(&moves);
-        let score_2 = territory_evaluate(&gs);
+        let score_2 = territory_evaluate(&gs, 2);
         // let score_test = basic_evaluate(&gs);
         // debug!("{:?} {:?}", score_2.sum(), score_2);
         // debug!("{:?} {:?}", score_test.sum(), score_test);
