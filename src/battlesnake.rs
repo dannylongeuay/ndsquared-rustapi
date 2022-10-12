@@ -264,10 +264,10 @@ pub struct UndoInfo {
 impl UndoInfo {
     fn new() -> Self {
         UndoInfo {
-            previous_tails: vec![HashMap::new(); 100],
-            previous_health: vec![HashMap::new(); 100],
-            eaten_food: vec![Vec::new(); 100],
-            eliminated_snakes: vec![Vec::new(); 100],
+            previous_tails: vec![HashMap::new(); 1000],
+            previous_health: vec![HashMap::new(); 1000],
+            eaten_food: vec![Vec::new(); 1000],
+            eliminated_snakes: vec![Vec::new(); 1000],
         }
     }
 }
@@ -431,6 +431,21 @@ impl GameState {
         }
         self.compute_metadata();
     }
+    fn direction_to(&self, a: &Coord, b: &Coord) -> Option<Direction> {
+        if (i32::rem_euclid(a.x + 1, self.board.width), a.y) == (b.x, b.y) {
+            return Some(Direction::Right);
+        }
+        if (i32::rem_euclid(a.x - 1, self.board.width), a.y) == (b.x, b.y) {
+            return Some(Direction::Left);
+        }
+        if (a.x, i32::rem_euclid(a.y + 1, self.board.height)) == (b.x, b.y) {
+            return Some(Direction::Up);
+        }
+        if (a.x, i32::rem_euclid(a.y - 1, self.board.height)) == (b.x, b.y) {
+            return Some(Direction::Down);
+        }
+        None
+    }
     fn adjacent_coord(&self, coord: &Coord, dir: &Direction) -> Coord {
         let mut x: i32 = coord.x;
         let mut y: i32 = coord.y;
@@ -462,6 +477,44 @@ impl GameState {
             moves.push((self.adjacent_coord(coord, &direction), direction));
         }
         moves
+    }
+    fn all_snake_move_combos(&self) -> Vec<Vec<(String, Coord)>> {
+        let mut moves: Vec<(String, Coord)> = Vec::new();
+        let mut move_combos: Vec<Vec<(String, Coord)>> = Vec::new();
+        self.move_combinations(0, 0, &mut moves, &mut move_combos);
+        move_combos
+    }
+    fn move_combinations(
+        &self,
+        depth: usize,
+        index: usize,
+        moves: &mut Vec<(String, Coord)>,
+        move_combos: &mut Vec<Vec<(String, Coord)>>,
+    ) {
+        if depth == self.board.snakes.len() {
+            return;
+        }
+
+        let snake = &self.board.snakes[index];
+
+        let viable_moves: Vec<(Coord, Direction)> = self
+            .adjacent_moves(&snake.head)
+            .iter()
+            .cloned()
+            .filter(|(coord, _)| self.viable(&coord))
+            .collect();
+
+        let next_index = index + 1 % self.board.snakes.len();
+
+        for (coord, _direction) in viable_moves {
+            moves.push((snake.id.clone(), coord));
+            trace!("{:?} {:?} {:?} {:?}", depth, moves, snake.id, next_index);
+            if moves.len() == self.board.snakes.len() {
+                move_combos.push(moves.clone());
+            }
+            self.move_combinations(depth + 1, next_index, moves, move_combos);
+            moves.pop();
+        }
     }
     fn valid_at(&self, coord: &Coord) -> bool {
         in_bounds(coord, self.board.width, self.board.height)
@@ -1100,6 +1153,175 @@ fn territory_evaluate(gs: &GameState, depth: i32) -> Score {
     score.survival = depth * 10000 + gs.you.health * 100;
 
     score
+}
+
+fn mcts_evaluate(gs: &GameState) -> f32 {
+    if gs.board.snakes.len() == 0 {
+        return 0.;
+    }
+    if gs.board.snakes.len() == 1 {
+        if gs.you.eliminated {
+            return -1.;
+        } else {
+            return 1.;
+        }
+    }
+    0.01
+}
+
+pub struct MCTS {
+    gs: GameState,
+    root_node: MCTSNode,
+    best_direction: Direction,
+}
+
+#[derive(Debug)]
+pub struct MCTSNode {
+    depth: usize,
+    moves: Vec<(String, Coord)>,
+    children: Vec<Self>,
+    visits: f32,
+    score_sum: f32,
+}
+
+impl MCTSNode {
+    fn new(moves: Vec<(String, Coord)>, depth: usize) -> Self {
+        MCTSNode {
+            depth,
+            moves,
+            children: Vec::new(),
+            visits: 0.,
+            score_sum: 0.,
+        }
+    }
+    fn execute(&mut self, gs: &mut GameState) -> f32 {
+        // Advance game state
+        if !self.moves.is_empty() {
+            trace!("advanced game state at depth {:?}", self.depth);
+            gs.advance(&self.moves);
+        }
+        let mut score = 0.;
+        // Selection
+        if !self.children.is_empty() {
+            if let Some(next_node) = self.select(1.) {
+                trace!("selected node {:?}", next_node);
+                score = next_node.execute(gs);
+            }
+        // Expansion
+        } else {
+            self.expand(gs);
+            if let Some(simulation_node) = self.select(1.) {
+                // Simulation
+                trace!("simulated node {:?}", simulation_node);
+                score = simulation_node.simulate(gs, 20);
+            }
+        }
+        // Backpropagation
+        self.visits += 1.;
+        self.score_sum += score;
+        trace!(
+            "sending score {:?} back up at depth {:?}",
+            score,
+            self.depth
+        );
+        score
+    }
+    fn select(&mut self, c: f32) -> Option<&mut MCTSNode> {
+        let mut best_score: f32 = f32::NEG_INFINITY;
+        let mut best_child: Option<&mut MCTSNode> = None;
+        for child in &mut self.children {
+            if child.visits == 0. {
+                return Some(child);
+            }
+            // TODO: should child.visits.ln() be (child.visits + 1.).ln()?
+            let exploration = 2. * (child.visits.ln() / child.visits).sqrt();
+            let exploitation = child.score_sum / child.visits;
+            let score = c * exploration + exploitation;
+            trace!(
+                "score {:?} = {:?} * {:?} + {:?}",
+                score,
+                c,
+                exploration,
+                exploitation
+            );
+            if score > best_score {
+                best_score = score;
+                best_child = Some(child);
+            }
+        }
+        best_child
+    }
+    fn expand(&mut self, gs: &GameState) {
+        for move_combo in gs.all_snake_move_combos() {
+            self.children
+                .push(MCTSNode::new(move_combo, self.depth + 1));
+        }
+    }
+    fn simulate(&mut self, gs: &mut GameState, max_turns: usize) -> f32 {
+        let mut turns = 0;
+        gs.advance(&self.moves);
+        // TODO: check if gamestate is in a terminal state
+        while turns < max_turns {
+            let mut random_moves: Vec<(String, Coord)> = Vec::new();
+            for snake in &gs.board.snakes {
+                if snake.eliminated {
+                    continue;
+                }
+                random_moves.push((snake.id.clone(), gs.random_valid_move(&snake.head).0));
+            }
+            gs.advance(&random_moves);
+            turns += 1;
+        }
+        mcts_evaluate(gs)
+    }
+}
+
+impl MCTS {
+    fn new(gs: &GameState) -> Self {
+        let mut root_node = MCTSNode::new(Vec::new(), 0);
+        root_node.expand(gs);
+        MCTS {
+            gs: gs.clone(),
+            root_node,
+            best_direction: gs.random_valid_move(&gs.you.head).1,
+        }
+    }
+    fn search(&mut self) {
+        self.root_node.execute(&mut self.gs.clone());
+    }
+    fn search_until_time_elapsed(&mut self, m: u128) {
+        let start = Instant::now();
+        while start.elapsed().as_millis() > m {
+            self.search();
+        }
+        self.update_best_direction();
+    }
+    fn search_n_iterations(&mut self, n: usize) {
+        for _ in 0..n {
+            self.search();
+        }
+        self.update_best_direction();
+    }
+    fn update_best_direction(&mut self) {
+        let mut best_child: Option<&MCTSNode> = None;
+        let mut most_visits: f32 = 0.;
+        for child in &self.root_node.children {
+            if child.visits > most_visits {
+                best_child = Some(child);
+                most_visits = child.visits;
+            }
+        }
+        if let Some(child) = best_child {
+            for (owner, coord) in &child.moves {
+                if *owner != self.gs.you.id {
+                    continue;
+                }
+                if let Some(direction) = self.gs.direction_to(&self.gs.you.head, coord) {
+                    self.best_direction = direction;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -2248,7 +2470,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_eq!(search.best_direction, Direction::Up);
-        // assert_eq!(search.best_score, 100);
     }
     #[test]
     fn test_search_choose_open_space_02() {
@@ -2272,7 +2493,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_eq!(search.best_direction, Direction::Right);
-        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_choose_open_space_03() {
@@ -2295,7 +2515,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_eq!(search.best_direction, Direction::Right);
-        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_choose_open_space_04() {
@@ -2325,7 +2544,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_eq!(search.best_direction, Direction::Right);
-        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_choose_open_space_05() {
@@ -2357,7 +2575,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_ne!(search.best_direction, Direction::Left);
-        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_cutoff_enemy_01() {
@@ -2421,7 +2638,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_eq!(search.best_direction, Direction::Right);
-        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_stomp_trapped() {
@@ -2455,7 +2671,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_eq!(search.best_direction, Direction::Left);
-        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_avoid_with_food() {
@@ -2472,7 +2687,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_eq!(search.best_direction, Direction::Left);
-        // assert_eq!(search.best_score.sum(), 100);
     }
     #[test]
     fn test_search_avoid_with_food_while_starving() {
@@ -2496,7 +2710,6 @@ pub mod tests {
         let mut search = Search::new(&gs);
         search.iterative_deepening(&mut gs, 100);
         assert_eq!(search.best_direction, Direction::Right);
-        // assert_eq!(search.best_score, 100);
     }
     #[test]
     fn test_search_inveitable_loss_01() {
@@ -2547,7 +2760,6 @@ pub mod tests {
         assert!(gs.board.food.contains(&Coord { x: 5, y: 5 }));
         assert_eq!(search.best_direction, Direction::Down);
         assert_eq!(gs.you.eliminated, false);
-        // assert_eq!(search.best_score.sum(), 100);
     }
     /*
     |  |B |B |B |B |B |B |B |B |B |  |
@@ -2633,11 +2845,85 @@ pub mod tests {
         ];
         gs.advance(&moves);
         let score_2 = territory_evaluate(&gs, 2);
-        // let score_test = basic_evaluate(&gs);
-        // debug!("{:?} {:?}", score_2.sum(), score_2);
-        // debug!("{:?} {:?}", score_test.sum(), score_test);
         assert_eq!(score_2.sum() > score_1.sum(), true);
-        // assert_eq!(score_2.sum(), 100);
+    }
+    #[test]
+    fn test_move_combinations_two_player() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |A3|  |
+        ",
+        );
+        gs.init();
+        let moves = gs.all_snake_move_combos();
+        assert_eq!(moves.len(), 9);
+    }
+    #[test]
+    fn test_move_combinations_three_player() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |B3|B4|  |  |  |  |
+        |  |  |  |  |  |B2|  |  |  |  |  |
+        |  |  |  |  |  |B1|  |  |  |  |  |
+        |  |  |  |  |  |B0|  |  |  |  |  |
+        |  |Y3|Y2|Y1|Y0|F |C0|C1|C2|C3|C4|
+        |  |  |  |  |  |  |  |  |  |  |C5|
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let moves = gs.all_snake_move_combos();
+        assert_eq!(moves.len(), 27);
+    }
+    #[test]
+    fn test_move_combinations_four_player() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |B3|B4|  |  |  |  |
+        |  |  |  |  |  |B2|  |  |  |  |  |
+        |  |  |  |  |  |B1|  |  |  |  |  |
+        |  |  |  |  |  |B0|  |  |  |  |  |
+        |  |Y3|Y2|Y1|Y0|F |C0|C1|C2|C3|C4|
+        |  |  |  |  |  |A0|  |  |  |  |C5|
+        |  |  |  |  |  |A1|  |  |  |  |  |
+        |  |  |  |  |  |A2|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let moves = gs.all_snake_move_combos();
+        assert_eq!(moves.len(), 81);
+    }
+    #[test]
+    fn test_move_combinations_four_player_start() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |F |  |  |  |  |  |  |
+        |  |  |  |  |  |SB|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |F |
+        |  |SA|  |  |  |F |  |  |  |SC|  |
+        |F |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |SY|  |  |  |  |  |
+        |  |  |  |  |F |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let moves = gs.all_snake_move_combos();
+        assert_eq!(moves.len(), 256);
     }
     // #[test]
     // fn test_search_start_with_advance() {
@@ -2672,6 +2958,211 @@ pub mod tests {
     //     search.timeout = 1000;
     //     search.iterative_deepening(&mut gs, 100);
     //     assert_eq!(search.best_direction, Direction::Left);
-    //     // assert_eq!(search.best_score.sum(), 100);
     // }
+    #[test]
+    fn test_mcts_node_expand() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |A3|  |
+        ",
+        );
+        gs.init();
+        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
+        mcts_node.expand(&gs);
+        assert_eq!(mcts_node.children.len(), 9);
+    }
+    #[test]
+    fn test_mcts_node_select_empty() {
+        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
+        let child = mcts_node.select(2.);
+        assert!(child.is_none());
+    }
+    #[test]
+    fn test_mcts_node_select_expanded() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |A3|  |
+        ",
+        );
+        gs.init();
+        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
+        mcts_node.expand(&gs);
+        let selected_child = mcts_node.select(2.);
+        assert!(selected_child.is_some());
+    }
+    #[test]
+    fn test_mcts_node_select_unvisited() {
+        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
+        let mut child_1 = MCTSNode::new(Vec::new(), 1);
+        child_1.visits = 1.;
+        let child_2 = MCTSNode::new(Vec::new(), 1);
+        mcts_node.children.push(child_1);
+        mcts_node.children.push(child_2);
+        if let Some(selected_child) = mcts_node.select(2.) {
+            debug!("{:?}", selected_child);
+            assert_eq!(selected_child.visits, 0.);
+        } else {
+            panic!("no child was selected");
+        }
+    }
+    #[test]
+    fn test_mcts_node_select_exploit() {
+        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
+        let mut child_1 = MCTSNode::new(Vec::new(), 1);
+        child_1.visits = 3.;
+        child_1.score_sum = 0.;
+        let mut child_2 = MCTSNode::new(Vec::new(), 1);
+        child_2.visits = 2.;
+        child_2.score_sum = 2.5;
+        let mut child_3 = MCTSNode::new(Vec::new(), 1);
+        child_3.visits = 1.;
+        child_3.score_sum = 3.5;
+        mcts_node.children.push(child_1);
+        mcts_node.children.push(child_2);
+        mcts_node.children.push(child_3);
+        if let Some(selected_child) = mcts_node.select(1.) {
+            assert_eq!(selected_child.visits, 1.);
+        } else {
+            panic!("no child was selected");
+        }
+    }
+    #[test]
+    fn test_mcts_node_select_explore() {
+        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
+        let mut child_1 = MCTSNode::new(Vec::new(), 1);
+        child_1.visits = 3.;
+        child_1.score_sum = 0.;
+        let mut child_2 = MCTSNode::new(Vec::new(), 1);
+        child_2.visits = 2.;
+        child_2.score_sum = 2.5;
+        let mut child_3 = MCTSNode::new(Vec::new(), 1);
+        child_3.visits = 1.;
+        child_3.score_sum = 3.5;
+        mcts_node.children.push(child_1);
+        mcts_node.children.push(child_2);
+        mcts_node.children.push(child_3);
+        if let Some(selected_child) = mcts_node.select(2.) {
+            assert_eq!(selected_child.visits, 2.);
+        } else {
+            panic!("no child was selected");
+        }
+    }
+    #[test]
+    fn test_mcts_node_simulate() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut mcts_node = MCTSNode::new(
+            vec![
+                ("Y".to_owned(), Coord { x: 1, y: 4 }),
+                ("A".to_owned(), Coord { x: 2, y: 3 }),
+            ],
+            1,
+        );
+        let score = mcts_node.simulate(&mut gs, 90);
+        assert!(score >= -1. && score <= 1.);
+        if let Some(snake) = gs.board.get_snake(&"A".to_owned()) {
+            assert_eq!(snake.health, 10);
+        } else {
+            panic!("snake A died");
+        }
+    }
+    #[test]
+    fn test_mcts_node_execute_root() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut mcts_node = MCTSNode::new(Vec::new(), 0);
+        mcts_node.expand(&gs);
+        let score = mcts_node.execute(&mut gs);
+        assert_eq!(mcts_node.children.len(), 9);
+        assert!(score >= -1. && score <= 1.);
+        assert!(mcts_node.children.iter().any(|c| c.visits == 1.));
+    }
+    #[test]
+    fn test_direction_to() {
+        let gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |  |  |
+        ",
+        );
+        assert_eq!(
+            gs.direction_to(&Coord { x: 1, y: 3 }, &Coord { x: 1, y: 4 }),
+            Some(Direction::Up)
+        );
+        assert_eq!(
+            gs.direction_to(&Coord { x: 1, y: 3 }, &Coord { x: 1, y: 2 }),
+            Some(Direction::Down)
+        );
+        assert_eq!(
+            gs.direction_to(&Coord { x: 1, y: 3 }, &Coord { x: 0, y: 3 }),
+            Some(Direction::Left)
+        );
+        assert_eq!(
+            gs.direction_to(&Coord { x: 1, y: 3 }, &Coord { x: 2, y: 3 }),
+            Some(Direction::Right)
+        );
+        assert_eq!(
+            gs.direction_to(&Coord { x: 0, y: 4 }, &Coord { x: 0, y: 0 }),
+            Some(Direction::Up)
+        );
+        assert_eq!(
+            gs.direction_to(&Coord { x: 0, y: 4 }, &Coord { x: 4, y: 4 }),
+            Some(Direction::Left)
+        );
+        assert_eq!(
+            gs.direction_to(&Coord { x: 4, y: 0 }, &Coord { x: 4, y: 4 }),
+            Some(Direction::Down)
+        );
+        assert_eq!(
+            gs.direction_to(&Coord { x: 4, y: 0 }, &Coord { x: 0, y: 0 }),
+            Some(Direction::Right)
+        );
+    }
+    #[test]
+    fn test_mcts_basic() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut mcts = MCTS::new(&gs);
+        mcts.search_n_iterations(100);
+        debug!("best dir: {:?}", mcts.best_direction);
+        for child in &mcts.root_node.children {
+            debug!("{:?} {:?} {:?}", child.visits, child.score_sum, child.moves);
+        }
+        assert_eq!(mcts.root_node.children.len(), 8);
+    }
 }
