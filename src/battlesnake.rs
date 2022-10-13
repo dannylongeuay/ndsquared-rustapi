@@ -203,6 +203,9 @@ pub struct Board {
     /// Mapping of snake ids to their index in the snakes array.
     #[serde(skip)]
     snake_indexes: HashMap<String, usize>,
+    /// Mapping of current moving snake id to next moving snake id.
+    #[serde(skip)]
+    snake_move_order: HashMap<String, String>,
 }
 
 impl Board {
@@ -294,6 +297,18 @@ fn in_bounds(coord: &Coord, width: i32, height: i32) -> bool {
 }
 
 impl GameState {
+    fn next_snake(&self, snake_id: &String) -> Option<&Battlesnake> {
+        trace!("{:?} {:?}", snake_id, self.board.snake_move_order);
+        let mut next_id = self.board.snake_move_order[snake_id].clone();
+        let mut next_snake = self.board.get_snake(&next_id);
+        let mut max_tries = self.board.snakes.len();
+        while next_snake.is_none() && max_tries > 0 {
+            next_id = self.board.snake_move_order[&next_id].clone();
+            next_snake = self.board.get_snake(&next_id);
+            max_tries -= 1;
+        }
+        next_snake
+    }
     fn advance(&mut self, moves: &Vec<(String, Coord)>) {
         let mut eaten_food: HashSet<Coord> = HashSet::new();
         let mut snake_heads: HashMap<String, (Coord, u32)> = HashMap::new();
@@ -478,6 +493,31 @@ impl GameState {
         }
         moves
     }
+    fn viable_moves(&self, coord: &Coord) -> Vec<(Coord, Direction)> {
+        let mut moves: Vec<(Coord, Direction)> = Vec::new();
+        for direction in Direction::iter() {
+            let adj_coord = self.adjacent_coord(coord, &direction);
+            if !self.viable(&adj_coord) {
+                continue;
+            }
+            moves.push((adj_coord, direction));
+        }
+        moves
+    }
+    fn smart_moves(&self, coord: &Coord) -> Vec<(Coord, Direction)> {
+        let mut moves: Vec<(Coord, Direction)> = Vec::new();
+        for direction in Direction::iter() {
+            let adj_coord = self.adjacent_coord(coord, &direction);
+            if !self.viable(&adj_coord) {
+                continue;
+            }
+            if self.board.avoids.contains(&adj_coord) {
+                continue;
+            }
+            moves.push((adj_coord, direction));
+        }
+        moves
+    }
     fn all_snake_move_combos(&self) -> Vec<Vec<(String, Coord)>> {
         let mut moves: Vec<(String, Coord)> = Vec::new();
         let mut move_combos: Vec<Vec<(String, Coord)>> = Vec::new();
@@ -527,7 +567,25 @@ impl GameState {
     }
     fn init(&mut self) {
         self.undo = UndoInfo::new();
+        self.compute_snake_move_order();
         self.compute_metadata();
+    }
+    fn compute_snake_move_order(&mut self) {
+        let mut snake_move_order: HashMap<String, String> = HashMap::new();
+        let mut prev_snake_option: Option<String> = None;
+        for snake in &self.board.snakes {
+            if let Some(prev_snake) = prev_snake_option {
+                snake_move_order.insert(prev_snake.clone(), snake.id.clone());
+            }
+            prev_snake_option = Some(snake.id.clone());
+        }
+        if self.board.snakes.len() > 1 {
+            snake_move_order.insert(
+                self.board.snakes.last().unwrap().id.clone(),
+                self.board.snakes[0].id.clone(),
+            );
+        }
+        self.board.snake_move_order = snake_move_order;
     }
     fn compute_metadata(&mut self) {
         let mut obstacles: HashSet<Coord> = HashSet::new();
@@ -544,7 +602,7 @@ impl GameState {
                 if self.you.id == snake.id {
                     continue;
                 }
-                if i != 1 {
+                if i != 0 {
                     continue;
                 }
                 if self.you.length <= snake.length {
@@ -554,6 +612,7 @@ impl GameState {
                 }
             }
         }
+        // Ensure last snake wraps around to first snake for move order
         for hazard in &self.board.hazards {
             let mut total_damage: i32 = self.game.ruleset.settings.hazard_damage_per_turn;
             if let Some(damage) = hazard_damage.get_mut(&hazard) {
@@ -717,6 +776,27 @@ impl GameState {
             available_squares,
         }
     }
+    fn current_status(&self) -> GameStatus {
+        if self.board.snakes.len() == 0 {
+            return GameStatus::Drawn;
+        }
+        if self.board.snakes.len() == 1 {
+            if self.you.eliminated {
+                return GameStatus::Losing;
+            } else {
+                return GameStatus::Winning;
+            }
+        }
+        GameStatus::Running
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum GameStatus {
+    Winning,
+    Losing,
+    Drawn,
+    Running,
 }
 
 #[derive(Debug, Clone)]
@@ -1155,18 +1235,30 @@ fn territory_evaluate(gs: &GameState, depth: i32) -> Score {
     score
 }
 
-fn mcts_evaluate(gs: &GameState) -> f32 {
-    if gs.board.snakes.len() == 0 {
-        return 0.;
+fn mcts_evaluate(gs: &GameState, depth: f32) -> f32 {
+    match gs.current_status() {
+        GameStatus::Drawn => return 0.,
+        GameStatus::Losing => return -1.,
+        GameStatus::Winning => return 1.,
+        GameStatus::Running => {}
     }
-    if gs.board.snakes.len() == 1 {
-        if gs.you.eliminated {
-            return -1.;
-        } else {
-            return 1.;
+    let mut longest = 0;
+    for snake in &gs.board.snakes {
+        if snake.length > longest {
+            longest = snake.length;
         }
     }
-    0.01
+    let mut score: f32 = 0.;
+    score -= 0.001 * gs.you.head.manhattan_distance(&gs.board.center()) as f32;
+    score += 0.001 * depth;
+    score += 0.001 * gs.you.health as f32;
+    score += 0.001 * gs.you.length as f32;
+    if gs.you.length >= longest {
+        score += 0.05;
+    } else {
+        score -= 0.05;
+    }
+    score
 }
 
 pub struct MCTS {
@@ -1179,38 +1271,53 @@ pub struct MCTS {
 pub struct MCTSNode {
     depth: usize,
     moves: Vec<(String, Coord)>,
+    current_snake_id: String,
     children: Vec<Self>,
     visits: f32,
     score_sum: f32,
+    exploration_constant: f32,
 }
 
 impl MCTSNode {
-    fn new(moves: Vec<(String, Coord)>, depth: usize) -> Self {
+    fn new(current_snake_id: String, moves: Vec<(String, Coord)>, depth: usize) -> Self {
         MCTSNode {
             depth,
             moves,
+            current_snake_id,
             children: Vec::new(),
             visits: 0.,
             score_sum: 0.,
+            exploration_constant: 1.,
+        }
+    }
+    fn advance(&mut self, gs: &mut GameState) {
+        if self.moves.len() == gs.board.snakes.len() {
+            trace!(
+                "advanced game state at depth {:?} {:?}",
+                self.depth,
+                self.moves,
+            );
+            gs.advance(&self.moves);
+            self.moves.clear();
         }
     }
     fn execute(&mut self, gs: &mut GameState) -> f32 {
         // Advance game state
-        if !self.moves.is_empty() {
-            trace!("advanced game state at depth {:?}", self.depth);
-            gs.advance(&self.moves);
-        }
+        self.advance(gs);
         let mut score = 0.;
+        // Terminal Node
+        if gs.current_status() != GameStatus::Running {
+            score = mcts_evaluate(gs, self.depth as f32);
         // Selection
-        if !self.children.is_empty() {
-            if let Some(next_node) = self.select(1.) {
+        } else if !self.children.is_empty() {
+            if let Some(next_node) = self.select(self.exploration_constant) {
                 trace!("selected node {:?}", next_node);
                 score = next_node.execute(gs);
             }
         // Expansion
         } else {
-            self.expand(gs);
-            if let Some(simulation_node) = self.select(1.) {
+            self.expand(gs, false);
+            if let Some(simulation_node) = self.select(self.exploration_constant) {
                 // Simulation
                 trace!("simulated node {:?}", simulation_node);
                 score = simulation_node.simulate(gs, 20);
@@ -1233,12 +1340,12 @@ impl MCTSNode {
             if child.visits == 0. {
                 return Some(child);
             }
-            // TODO: should child.visits.ln() be (child.visits + 1.).ln()?
-            let exploration = 2. * (child.visits.ln() / child.visits).sqrt();
+            let exploration = (self.visits.ln() / child.visits).sqrt();
             let exploitation = child.score_sum / child.visits;
             let score = c * exploration + exploitation;
             trace!(
-                "score {:?} = {:?} * {:?} + {:?}",
+                "depth: {:?} | score: {:?} = {:?} * {:?} + {:?}",
+                self.depth,
                 score,
                 c,
                 exploration,
@@ -1251,35 +1358,51 @@ impl MCTSNode {
         }
         best_child
     }
-    fn expand(&mut self, gs: &GameState) {
-        for move_combo in gs.all_snake_move_combos() {
+    fn expand(&mut self, gs: &GameState, root_expand: bool) {
+        let next_snake_option = gs.next_snake(&self.current_snake_id);
+        if next_snake_option.is_none() {
+            panic!("trying to expand, but there are no snakes!!");
+        }
+        let mut next_snake = next_snake_option.unwrap();
+        if root_expand {
+            next_snake = gs.board.get_snake(&gs.you.id).unwrap();
+        }
+        let mut snake_moves: Vec<(Coord, Direction)> = Vec::new();
+        if next_snake.id == gs.you.id {
+            snake_moves.append(&mut gs.smart_moves(&next_snake.head));
+        } else {
+            snake_moves.append(&mut gs.viable_moves(&next_snake.head));
+        }
+        for (coord, _direction) in &snake_moves {
+            let mut moves = self.moves.clone();
+            moves.push((next_snake.id.clone(), *coord));
             self.children
-                .push(MCTSNode::new(move_combo, self.depth + 1));
+                .push(MCTSNode::new(next_snake.id.clone(), moves, self.depth + 1));
         }
     }
     fn simulate(&mut self, gs: &mut GameState, max_turns: usize) -> f32 {
         let mut turns = 0;
-        gs.advance(&self.moves);
-        // TODO: check if gamestate is in a terminal state
-        while turns < max_turns {
-            let mut random_moves: Vec<(String, Coord)> = Vec::new();
-            for snake in &gs.board.snakes {
-                if snake.eliminated {
-                    continue;
-                }
-                random_moves.push((snake.id.clone(), gs.random_valid_move(&snake.head).0));
+        self.advance(gs);
+        let mut current_snake_id = self.current_snake_id.clone();
+        while turns < max_turns && gs.current_status() == GameStatus::Running {
+            if let Some(next_snake) = gs.next_snake(&current_snake_id) {
+                self.moves.push((
+                    next_snake.id.clone(),
+                    gs.random_valid_move(&next_snake.head).0,
+                ));
+                current_snake_id = next_snake.id.clone();
             }
-            gs.advance(&random_moves);
+            self.advance(gs);
             turns += 1;
         }
-        mcts_evaluate(gs)
+        mcts_evaluate(gs, (self.depth + turns) as f32)
     }
 }
 
 impl MCTS {
     fn new(gs: &GameState) -> Self {
-        let mut root_node = MCTSNode::new(Vec::new(), 0);
-        root_node.expand(gs);
+        let mut root_node = MCTSNode::new(gs.you.id.clone(), Vec::new(), 0);
+        root_node.expand(gs, true);
         MCTS {
             gs: gs.clone(),
             root_node,
@@ -1291,7 +1414,7 @@ impl MCTS {
     }
     fn search_until_time_elapsed(&mut self, m: u128) {
         let start = Instant::now();
-        while start.elapsed().as_millis() > m {
+        while start.elapsed().as_millis() < m {
             self.search();
         }
         self.update_best_direction();
@@ -1306,6 +1429,10 @@ impl MCTS {
         let mut best_child: Option<&MCTSNode> = None;
         let mut most_visits: f32 = 0.;
         for child in &self.root_node.children {
+            info!(
+                "Child - visits: {:?} | score_sum: {:?} | moves: {:?}",
+                child.visits, child.score_sum, child.moves
+            );
             if child.visits > most_visits {
                 best_child = Some(child);
                 most_visits = child.visits;
@@ -1318,6 +1445,7 @@ impl MCTS {
                 }
                 if let Some(direction) = self.gs.direction_to(&self.gs.you.head, coord) {
                     self.best_direction = direction;
+                    info!("best direction updated to {:?}", self.best_direction);
                 }
             }
         }
@@ -1359,24 +1487,30 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
     );
     gs.init();
 
-    let mut search = Search::new(&gs);
-    search.iterative_deepening(&mut gs, 50);
+    // let mut search = Search::new(&gs);
+    // search.iterative_deepening(&mut gs, 50);
+    let mut mcts = MCTS::new(&gs);
+    mcts.search_until_time_elapsed(425);
 
+    // let mr = MoveResponse {
+    //     direction: search.best_direction,
+    //     shout: format!(
+    //         "MOVE: {:?} | SCORE: {:?} | TIME: {:?} | ITERATIONS: {:?} | PV LENGTH: {:?}",
+    //         search.best_direction,
+    //         search.best_score.sum(),
+    //         search.search_time,
+    //         search.iteration_reached,
+    //         search.best_pv.len()
+    //     ),
+    // };
     let mr = MoveResponse {
-        direction: search.best_direction,
-        shout: format!(
-            "MOVE: {:?} | SCORE: {:?} | TIME: {:?} | ITERATIONS: {:?} | PV LENGTH: {:?}",
-            search.best_direction,
-            search.best_score.sum(),
-            search.search_time,
-            search.iteration_reached,
-            search.best_pv.len()
-        ),
+        direction: mcts.best_direction,
+        shout: "foobar".to_owned(),
     };
 
     info!("{:?}", mr);
-    info!("{:?}", search.best_score);
-    info!("PV: {:?}", search.best_pv);
+    // info!("{:?}", search.best_score);
+    // info!("PV: {:?}", search.best_pv);
 
     mr
 }
@@ -1524,6 +1658,7 @@ pub mod tests {
             stomps: HashSet::new(),
             avoids: HashSet::new(),
             snake_indexes: HashMap::new(),
+            snake_move_order: HashMap::new(),
         };
         let mut gs = GameState {
             game,
@@ -2971,13 +3106,13 @@ pub mod tests {
         ",
         );
         gs.init();
-        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
-        mcts_node.expand(&gs);
-        assert_eq!(mcts_node.children.len(), 9);
+        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), Vec::new(), 1);
+        mcts_node.expand(&gs, true);
+        assert_eq!(mcts_node.children.len(), 2);
     }
     #[test]
     fn test_mcts_node_select_empty() {
-        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
         let child = mcts_node.select(2.);
         assert!(child.is_none());
     }
@@ -2993,17 +3128,17 @@ pub mod tests {
         ",
         );
         gs.init();
-        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
-        mcts_node.expand(&gs);
+        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), Vec::new(), 1);
+        mcts_node.expand(&gs, true);
         let selected_child = mcts_node.select(2.);
         assert!(selected_child.is_some());
     }
     #[test]
     fn test_mcts_node_select_unvisited() {
-        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
-        let mut child_1 = MCTSNode::new(Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut child_1 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
         child_1.visits = 1.;
-        let child_2 = MCTSNode::new(Vec::new(), 1);
+        let child_2 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
         mcts_node.children.push(child_1);
         mcts_node.children.push(child_2);
         if let Some(selected_child) = mcts_node.select(2.) {
@@ -3015,14 +3150,15 @@ pub mod tests {
     }
     #[test]
     fn test_mcts_node_select_exploit() {
-        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
-        let mut child_1 = MCTSNode::new(Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        mcts_node.visits = 6.;
+        let mut child_1 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
         child_1.visits = 3.;
         child_1.score_sum = 0.;
-        let mut child_2 = MCTSNode::new(Vec::new(), 1);
+        let mut child_2 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
         child_2.visits = 2.;
         child_2.score_sum = 2.5;
-        let mut child_3 = MCTSNode::new(Vec::new(), 1);
+        let mut child_3 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
         child_3.visits = 1.;
         child_3.score_sum = 3.5;
         mcts_node.children.push(child_1);
@@ -3036,21 +3172,22 @@ pub mod tests {
     }
     #[test]
     fn test_mcts_node_select_explore() {
-        let mut mcts_node = MCTSNode::new(Vec::new(), 1);
-        let mut child_1 = MCTSNode::new(Vec::new(), 1);
-        child_1.visits = 3.;
+        let mut mcts_node = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        mcts_node.visits = 5.;
+        let mut child_1 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        child_1.visits = 1.;
         child_1.score_sum = 0.;
-        let mut child_2 = MCTSNode::new(Vec::new(), 1);
+        let mut child_2 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
         child_2.visits = 2.;
         child_2.score_sum = 2.5;
-        let mut child_3 = MCTSNode::new(Vec::new(), 1);
-        child_3.visits = 1.;
+        let mut child_3 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        child_3.visits = 2.;
         child_3.score_sum = 3.5;
         mcts_node.children.push(child_1);
         mcts_node.children.push(child_2);
         mcts_node.children.push(child_3);
-        if let Some(selected_child) = mcts_node.select(2.) {
-            assert_eq!(selected_child.visits, 2.);
+        if let Some(selected_child) = mcts_node.select(5.) {
+            assert_eq!(selected_child.visits, 1.);
         } else {
             panic!("no child was selected");
         }
@@ -3060,24 +3197,23 @@ pub mod tests {
         let mut gs = new_gamestate_from_text(
             "
         |  |  |  |  |  |
-        |  |Y0|F |A0|  |
+        |  |Y0|  |A0|  |
         |  |Y1|  |A1|  |
         |  |Y2|  |A2|  |
-        |  |  |  |  |  |
+        |  |  |  |A3|  |
         ",
         );
         gs.init();
         let mut mcts_node = MCTSNode::new(
-            vec![
-                ("Y".to_owned(), Coord { x: 1, y: 4 }),
-                ("A".to_owned(), Coord { x: 2, y: 3 }),
-            ],
+            gs.you.id.clone(),
+            vec![("Y".to_owned(), Coord { x: 1, y: 4 })],
             1,
         );
-        let score = mcts_node.simulate(&mut gs, 90);
-        assert!(score >= -1. && score <= 1.);
+        let score = mcts_node.simulate(&mut gs, 10);
+        debug!("{:?}", score);
+        assert!(score >= -100. && score <= 100.);
         if let Some(snake) = gs.board.get_snake(&"A".to_owned()) {
-            assert_eq!(snake.health, 10);
+            assert!(snake.health < 100);
         } else {
             panic!("snake A died");
         }
@@ -3094,11 +3230,11 @@ pub mod tests {
         ",
         );
         gs.init();
-        let mut mcts_node = MCTSNode::new(Vec::new(), 0);
-        mcts_node.expand(&gs);
+        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), Vec::new(), 0);
+        mcts_node.expand(&gs, true);
         let score = mcts_node.execute(&mut gs);
-        assert_eq!(mcts_node.children.len(), 9);
-        assert!(score >= -1. && score <= 1.);
+        assert_eq!(mcts_node.children.len(), 2);
+        assert!(score >= -100. && score <= 100.);
         assert!(mcts_node.children.iter().any(|c| c.visits == 1.));
     }
     #[test]
@@ -3158,11 +3294,61 @@ pub mod tests {
         );
         gs.init();
         let mut mcts = MCTS::new(&gs);
-        mcts.search_n_iterations(100);
-        debug!("best dir: {:?}", mcts.best_direction);
-        for child in &mcts.root_node.children {
-            debug!("{:?} {:?} {:?}", child.visits, child.score_sum, child.moves);
+        mcts.search_n_iterations(10);
+        let mut best_child_option = Some(&mut mcts.root_node);
+        while let Some(best_child) = best_child_option {
+            debug!(
+                "{:?} {:?} {:?}",
+                best_child.visits, best_child.score_sum, best_child.moves
+            );
+            best_child_option = best_child.select(1.);
         }
-        assert_eq!(mcts.root_node.children.len(), 8);
+        assert_eq!(mcts.root_node.children.len(), 2);
+    }
+    #[test]
+    fn test_smart_moves() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |  |
+        |  |Y0|F |A0|  |
+        |  |Y1|  |A1|  |
+        |  |Y2|  |A2|  |
+        |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let smart_moves = gs.smart_moves(&gs.you.head);
+        assert_eq!(smart_moves.len(), 2);
+    }
+    #[test]
+    fn test_mcts_start() {
+        let mut gs = new_gamestate_from_text(
+            "
+        |  |  |  |  |F |  |  |  |  |  |  |
+        |  |  |  |  |  |SB|  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |F |
+        |  |SA|  |  |  |F |  |  |  |SC|  |
+        |F |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |  |  |  |  |  |  |
+        |  |  |  |  |  |SY|  |  |  |  |  |
+        |  |  |  |  |F |  |  |  |  |  |  |
+        ",
+        );
+        gs.init();
+        let mut mcts = MCTS::new(&gs);
+        // mcts.search_n_iterations(10);
+        mcts.search_until_time_elapsed(425);
+        // let mut best_child_option = Some(&mut mcts.root_node);
+        // while let Some(best_child) = best_child_option {
+        //     debug!(
+        //         "{:?} {:?} {:?}",
+        //         best_child.visits, best_child.score_sum, best_child.moves
+        //     );
+        //     best_child_option = best_child.select(best_child.exploration_constant);
+        // }
+        assert_eq!(mcts.root_node.children.len(), 4);
     }
 }
