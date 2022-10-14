@@ -518,44 +518,44 @@ impl GameState {
         }
         moves
     }
-    fn all_snake_move_combos(&self) -> Vec<Vec<(String, Coord)>> {
-        let mut moves: Vec<(String, Coord)> = Vec::new();
-        let mut move_combos: Vec<Vec<(String, Coord)>> = Vec::new();
-        self.move_combinations(0, 0, &mut moves, &mut move_combos);
-        move_combos
-    }
-    fn move_combinations(
-        &self,
-        depth: usize,
-        index: usize,
-        moves: &mut Vec<(String, Coord)>,
-        move_combos: &mut Vec<Vec<(String, Coord)>>,
-    ) {
-        if depth == self.board.snakes.len() {
-            return;
-        }
+    // fn all_snake_move_combos(&self) -> Vec<Vec<(String, Coord)>> {
+    //     let mut moves: Vec<(String, Coord)> = Vec::new();
+    //     let mut move_combos: Vec<Vec<(String, Coord)>> = Vec::new();
+    //     self.move_combinations(0, 0, &mut moves, &mut move_combos);
+    //     move_combos
+    // }
+    // fn move_combinations(
+    //     &self,
+    //     depth: usize,
+    //     index: usize,
+    //     moves: &mut Vec<(String, Coord)>,
+    //     move_combos: &mut Vec<Vec<(String, Coord)>>,
+    // ) {
+    //     if depth == self.board.snakes.len() {
+    //         return;
+    //     }
 
-        let snake = &self.board.snakes[index];
+    //     let snake = &self.board.snakes[index];
 
-        let viable_moves: Vec<(Coord, Direction)> = self
-            .adjacent_moves(&snake.head)
-            .iter()
-            .cloned()
-            .filter(|(coord, _)| self.viable(&coord))
-            .collect();
+    //     let viable_moves: Vec<(Coord, Direction)> = self
+    //         .adjacent_moves(&snake.head)
+    //         .iter()
+    //         .cloned()
+    //         .filter(|(coord, _)| self.viable(&coord))
+    //         .collect();
 
-        let next_index = index + 1 % self.board.snakes.len();
+    //     let next_index = index + 1 % self.board.snakes.len();
 
-        for (coord, _direction) in viable_moves {
-            moves.push((snake.id.clone(), coord));
-            trace!("{:?} {:?} {:?} {:?}", depth, moves, snake.id, next_index);
-            if moves.len() == self.board.snakes.len() {
-                move_combos.push(moves.clone());
-            }
-            self.move_combinations(depth + 1, next_index, moves, move_combos);
-            moves.pop();
-        }
-    }
+    //     for (coord, _direction) in viable_moves {
+    //         moves.push((snake.id.clone(), coord));
+    //         trace!("{:?} {:?} {:?} {:?}", depth, moves, snake.id, next_index);
+    //         if moves.len() == self.board.snakes.len() {
+    //             move_combos.push(moves.clone());
+    //         }
+    //         self.move_combinations(depth + 1, next_index, moves, move_combos);
+    //         moves.pop();
+    //     }
+    // }
     fn valid_at(&self, coord: &Coord) -> bool {
         in_bounds(coord, self.board.width, self.board.height)
     }
@@ -890,7 +890,7 @@ impl Search {
             best_score,
             best_pv: Vec::new(),
             search_time: 0,
-            timeout: 425,
+            timeout: 400,
             snake_order: move_order,
             evaluate_fn,
         }
@@ -1249,12 +1249,12 @@ fn mcts_evaluate(gs: &GameState, depth: f32) -> f32 {
         }
     }
     let mut score: f32 = 0.;
-    score -= 0.001 * gs.you.head.manhattan_distance(&gs.board.center()) as f32;
+    score -= 0.0001 * gs.you.head.manhattan_distance(&gs.board.center()) as f32;
     score += 0.001 * depth;
     score += 0.001 * gs.you.health as f32;
     score += 0.001 * gs.you.length as f32;
     if gs.you.length >= longest {
-        score += 0.05;
+        score += 0.005;
     } else {
         score -= 0.05;
     }
@@ -1265,6 +1265,8 @@ pub struct MCTS {
     gs: GameState,
     root_node: MCTSNode,
     best_direction: Direction,
+    iterations: u32,
+    timeout: u128,
 }
 
 #[derive(Debug)]
@@ -1272,6 +1274,7 @@ pub struct MCTSNode {
     depth: usize,
     moves: Vec<(String, Coord)>,
     current_snake_id: String,
+    current_move_coord: Coord,
     children: Vec<Self>,
     visits: f32,
     score_sum: f32,
@@ -1279,11 +1282,17 @@ pub struct MCTSNode {
 }
 
 impl MCTSNode {
-    fn new(current_snake_id: String, moves: Vec<(String, Coord)>, depth: usize) -> Self {
+    fn new(
+        current_snake_id: String,
+        current_move_coord: Coord,
+        moves: Vec<(String, Coord)>,
+        depth: usize,
+    ) -> Self {
         MCTSNode {
             depth,
             moves,
             current_snake_id,
+            current_move_coord,
             children: Vec::new(),
             visits: 0.,
             score_sum: 0.,
@@ -1376,8 +1385,12 @@ impl MCTSNode {
         for (coord, _direction) in &snake_moves {
             let mut moves = self.moves.clone();
             moves.push((next_snake.id.clone(), *coord));
-            self.children
-                .push(MCTSNode::new(next_snake.id.clone(), moves, self.depth + 1));
+            self.children.push(MCTSNode::new(
+                next_snake.id.clone(),
+                *coord,
+                moves,
+                self.depth + 1,
+            ));
         }
     }
     fn simulate(&mut self, gs: &mut GameState, max_turns: usize) -> f32 {
@@ -1401,37 +1414,49 @@ impl MCTSNode {
 
 impl MCTS {
     fn new(gs: &GameState) -> Self {
-        let mut root_node = MCTSNode::new(gs.you.id.clone(), Vec::new(), 0);
+        let mut root_node = MCTSNode::new(gs.you.id.clone(), gs.you.head, Vec::new(), 0);
         root_node.expand(gs, true);
         MCTS {
             gs: gs.clone(),
             root_node,
             best_direction: gs.random_valid_move(&gs.you.head).1,
+            iterations: 0,
+            timeout: 400,
         }
     }
     fn search(&mut self) {
         self.root_node.execute(&mut self.gs.clone());
     }
-    fn search_until_time_elapsed(&mut self, m: u128) {
+    fn search_until_time_elapsed(&mut self) {
         let start = Instant::now();
-        while start.elapsed().as_millis() < m {
+        while start.elapsed().as_millis() < self.timeout {
             self.search();
+            self.iterations += 1;
         }
         self.update_best_direction();
     }
+    #[allow(dead_code)]
     fn search_n_iterations(&mut self, n: usize) {
         for _ in 0..n {
             self.search();
+            self.iterations += 1;
         }
         self.update_best_direction();
     }
     fn update_best_direction(&mut self) {
         let mut best_child: Option<&MCTSNode> = None;
         let mut most_visits: f32 = 0.;
+        let debug_header = format!(
+            "{} Iterations {:?} {}",
+            "#".repeat(75),
+            self.iterations,
+            "#".repeat(25)
+        );
+        debug!("\n{}", debug_header);
         for child in &self.root_node.children {
             info!(
-                "Child - visits: {:?} | score_sum: {:?} | moves: {:?}",
-                child.visits, child.score_sum, child.moves
+                "Child - visits: {:?} | score_sum: {:?} | move: {:?}",
+                child.visits, child.score_sum, child.current_move_coord
             );
             if child.visits > most_visits {
                 best_child = Some(child);
@@ -1445,10 +1470,40 @@ impl MCTS {
                 }
                 if let Some(direction) = self.gs.direction_to(&self.gs.you.head, coord) {
                     self.best_direction = direction;
-                    info!("best direction updated to {:?}", self.best_direction);
+                    info!("Best direction: {:?}", self.best_direction);
                 }
             }
         }
+        debug!("\n{}", "#".repeat(debug_header.len()));
+    }
+    fn principal_variation(&self, gs: &GameState) -> Vec<(Coord, Direction)> {
+        let mut pv: Vec<(Coord, Direction)> = Vec::new();
+        let mut most_visited_child_option = Some(&self.root_node);
+        let mut prev_coord: Coord = gs.you.head;
+        while let Some(most_visited_child) = most_visited_child_option {
+            debug!(
+                "{:?} {:?} {:?} {:?} {:?}",
+                most_visited_child.depth,
+                most_visited_child.visits,
+                most_visited_child.score_sum,
+                most_visited_child.current_snake_id,
+                most_visited_child.current_move_coord,
+            );
+            if most_visited_child.current_snake_id == gs.you.id {
+                if let Some(direction) = self
+                    .gs
+                    .direction_to(&prev_coord, &most_visited_child.current_move_coord)
+                {
+                    pv.push((most_visited_child.current_move_coord.clone(), direction));
+                    prev_coord = most_visited_child.current_move_coord;
+                }
+            }
+            most_visited_child_option = most_visited_child
+                .children
+                .iter()
+                .max_by(|c, o| c.visits.total_cmp(&o.visits));
+        }
+        pv
     }
 }
 
@@ -1487,30 +1542,33 @@ pub fn make_move(mut gs: GameState) -> MoveResponse {
     );
     gs.init();
 
-    // let mut search = Search::new(&gs);
-    // search.iterative_deepening(&mut gs, 50);
-    let mut mcts = MCTS::new(&gs);
-    mcts.search_until_time_elapsed(425);
-
-    // let mr = MoveResponse {
-    //     direction: search.best_direction,
-    //     shout: format!(
-    //         "MOVE: {:?} | SCORE: {:?} | TIME: {:?} | ITERATIONS: {:?} | PV LENGTH: {:?}",
-    //         search.best_direction,
-    //         search.best_score.sum(),
-    //         search.search_time,
-    //         search.iteration_reached,
-    //         search.best_pv.len()
-    //     ),
-    // };
-    let mr = MoveResponse {
-        direction: mcts.best_direction,
+    let mut mr = MoveResponse {
+        direction: Direction::Up,
         shout: "foobar".to_owned(),
     };
+    // TODO: update this
+    if gs.board.snakes.len() > 0 {
+        let mut mcts = MCTS::new(&gs);
+        mcts.search_until_time_elapsed();
+        mr.direction = mcts.best_direction;
+        mr.shout = format!("PV: {:?}", mcts.principal_variation(&gs));
+    } else {
+        let mut search = Search::new(&gs);
+        search.iterative_deepening(&mut gs, 50);
+        mr.direction = search.best_direction;
+        mr.shout = format!(
+            "MOVE: {:?} | SCORE: {:?} | TIME: {:?} | ITERATIONS: {:?} | PV LENGTH: {:?}",
+            search.best_direction,
+            search.best_score.sum(),
+            search.search_time,
+            search.iteration_reached,
+            search.best_pv.len()
+        );
+        info!("{:?}", search.best_score);
+        info!("PV: {:?}", search.best_pv);
+    }
 
     info!("{:?}", mr);
-    // info!("{:?}", search.best_score);
-    // info!("PV: {:?}", search.best_pv);
 
     mr
 }
@@ -2982,84 +3040,84 @@ pub mod tests {
         let score_2 = territory_evaluate(&gs, 2);
         assert_eq!(score_2.sum() > score_1.sum(), true);
     }
-    #[test]
-    fn test_move_combinations_two_player() {
-        let mut gs = new_gamestate_from_text(
-            "
-        |  |  |  |  |  |
-        |  |Y0|F |A0|  |
-        |  |Y1|  |A1|  |
-        |  |Y2|  |A2|  |
-        |  |  |  |A3|  |
-        ",
-        );
-        gs.init();
-        let moves = gs.all_snake_move_combos();
-        assert_eq!(moves.len(), 9);
-    }
-    #[test]
-    fn test_move_combinations_three_player() {
-        let mut gs = new_gamestate_from_text(
-            "
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |B3|B4|  |  |  |  |
-        |  |  |  |  |  |B2|  |  |  |  |  |
-        |  |  |  |  |  |B1|  |  |  |  |  |
-        |  |  |  |  |  |B0|  |  |  |  |  |
-        |  |Y3|Y2|Y1|Y0|F |C0|C1|C2|C3|C4|
-        |  |  |  |  |  |  |  |  |  |  |C5|
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        ",
-        );
-        gs.init();
-        let moves = gs.all_snake_move_combos();
-        assert_eq!(moves.len(), 27);
-    }
-    #[test]
-    fn test_move_combinations_four_player() {
-        let mut gs = new_gamestate_from_text(
-            "
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |B3|B4|  |  |  |  |
-        |  |  |  |  |  |B2|  |  |  |  |  |
-        |  |  |  |  |  |B1|  |  |  |  |  |
-        |  |  |  |  |  |B0|  |  |  |  |  |
-        |  |Y3|Y2|Y1|Y0|F |C0|C1|C2|C3|C4|
-        |  |  |  |  |  |A0|  |  |  |  |C5|
-        |  |  |  |  |  |A1|  |  |  |  |  |
-        |  |  |  |  |  |A2|  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        ",
-        );
-        gs.init();
-        let moves = gs.all_snake_move_combos();
-        assert_eq!(moves.len(), 81);
-    }
-    #[test]
-    fn test_move_combinations_four_player_start() {
-        let mut gs = new_gamestate_from_text(
-            "
-        |  |  |  |  |F |  |  |  |  |  |  |
-        |  |  |  |  |  |SB|  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |F |
-        |  |SA|  |  |  |F |  |  |  |SC|  |
-        |F |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |  |  |  |  |  |  |
-        |  |  |  |  |  |SY|  |  |  |  |  |
-        |  |  |  |  |F |  |  |  |  |  |  |
-        ",
-        );
-        gs.init();
-        let moves = gs.all_snake_move_combos();
-        assert_eq!(moves.len(), 256);
-    }
+    // #[test]
+    // fn test_move_combinations_two_player() {
+    //     let mut gs = new_gamestate_from_text(
+    //         "
+    //     |  |  |  |  |  |
+    //     |  |Y0|F |A0|  |
+    //     |  |Y1|  |A1|  |
+    //     |  |Y2|  |A2|  |
+    //     |  |  |  |A3|  |
+    //     ",
+    //     );
+    //     gs.init();
+    //     let moves = gs.all_snake_move_combos();
+    //     assert_eq!(moves.len(), 9);
+    // }
+    // #[test]
+    // fn test_move_combinations_three_player() {
+    //     let mut gs = new_gamestate_from_text(
+    //         "
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |B3|B4|  |  |  |  |
+    //     |  |  |  |  |  |B2|  |  |  |  |  |
+    //     |  |  |  |  |  |B1|  |  |  |  |  |
+    //     |  |  |  |  |  |B0|  |  |  |  |  |
+    //     |  |Y3|Y2|Y1|Y0|F |C0|C1|C2|C3|C4|
+    //     |  |  |  |  |  |  |  |  |  |  |C5|
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     ",
+    //     );
+    //     gs.init();
+    //     let moves = gs.all_snake_move_combos();
+    //     assert_eq!(moves.len(), 27);
+    // }
+    // #[test]
+    // fn test_move_combinations_four_player() {
+    //     let mut gs = new_gamestate_from_text(
+    //         "
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |B3|B4|  |  |  |  |
+    //     |  |  |  |  |  |B2|  |  |  |  |  |
+    //     |  |  |  |  |  |B1|  |  |  |  |  |
+    //     |  |  |  |  |  |B0|  |  |  |  |  |
+    //     |  |Y3|Y2|Y1|Y0|F |C0|C1|C2|C3|C4|
+    //     |  |  |  |  |  |A0|  |  |  |  |C5|
+    //     |  |  |  |  |  |A1|  |  |  |  |  |
+    //     |  |  |  |  |  |A2|  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     ",
+    //     );
+    //     gs.init();
+    //     let moves = gs.all_snake_move_combos();
+    //     assert_eq!(moves.len(), 81);
+    // }
+    // #[test]
+    // fn test_move_combinations_four_player_start() {
+    //     let mut gs = new_gamestate_from_text(
+    //         "
+    //     |  |  |  |  |F |  |  |  |  |  |  |
+    //     |  |  |  |  |  |SB|  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |F |
+    //     |  |SA|  |  |  |F |  |  |  |SC|  |
+    //     |F |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |  |  |  |  |  |  |
+    //     |  |  |  |  |  |SY|  |  |  |  |  |
+    //     |  |  |  |  |F |  |  |  |  |  |  |
+    //     ",
+    //     );
+    //     gs.init();
+    //     let moves = gs.all_snake_move_combos();
+    //     assert_eq!(moves.len(), 256);
+    // }
     // #[test]
     // fn test_search_start_with_advance() {
     //     let mut gs = new_gamestate_from_text(
@@ -3106,13 +3164,13 @@ pub mod tests {
         ",
         );
         gs.init();
-        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), gs.you.head, Vec::new(), 1);
         mcts_node.expand(&gs, true);
         assert_eq!(mcts_node.children.len(), 2);
     }
     #[test]
     fn test_mcts_node_select_empty() {
-        let mut mcts_node = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         let child = mcts_node.select(2.);
         assert!(child.is_none());
     }
@@ -3128,17 +3186,17 @@ pub mod tests {
         ",
         );
         gs.init();
-        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), gs.you.head, Vec::new(), 1);
         mcts_node.expand(&gs, true);
         let selected_child = mcts_node.select(2.);
         assert!(selected_child.is_some());
     }
     #[test]
     fn test_mcts_node_select_unvisited() {
-        let mut mcts_node = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
-        let mut child_1 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
+        let mut child_1 = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         child_1.visits = 1.;
-        let child_2 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let child_2 = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         mcts_node.children.push(child_1);
         mcts_node.children.push(child_2);
         if let Some(selected_child) = mcts_node.select(2.) {
@@ -3150,15 +3208,15 @@ pub mod tests {
     }
     #[test]
     fn test_mcts_node_select_exploit() {
-        let mut mcts_node = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         mcts_node.visits = 6.;
-        let mut child_1 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut child_1 = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         child_1.visits = 3.;
         child_1.score_sum = 0.;
-        let mut child_2 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut child_2 = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         child_2.visits = 2.;
         child_2.score_sum = 2.5;
-        let mut child_3 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut child_3 = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         child_3.visits = 1.;
         child_3.score_sum = 3.5;
         mcts_node.children.push(child_1);
@@ -3172,15 +3230,15 @@ pub mod tests {
     }
     #[test]
     fn test_mcts_node_select_explore() {
-        let mut mcts_node = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut mcts_node = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         mcts_node.visits = 5.;
-        let mut child_1 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut child_1 = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         child_1.visits = 1.;
         child_1.score_sum = 0.;
-        let mut child_2 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut child_2 = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         child_2.visits = 2.;
         child_2.score_sum = 2.5;
-        let mut child_3 = MCTSNode::new("Y".to_owned(), Vec::new(), 1);
+        let mut child_3 = MCTSNode::new("Y".to_owned(), Coord { x: -1, y: -1 }, Vec::new(), 1);
         child_3.visits = 2.;
         child_3.score_sum = 3.5;
         mcts_node.children.push(child_1);
@@ -3206,6 +3264,7 @@ pub mod tests {
         gs.init();
         let mut mcts_node = MCTSNode::new(
             gs.you.id.clone(),
+            Coord { x: -1, y: -1 },
             vec![("Y".to_owned(), Coord { x: 1, y: 4 })],
             1,
         );
@@ -3230,7 +3289,7 @@ pub mod tests {
         ",
         );
         gs.init();
-        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), Vec::new(), 0);
+        let mut mcts_node = MCTSNode::new(gs.you.id.clone(), gs.you.head, Vec::new(), 0);
         mcts_node.expand(&gs, true);
         let score = mcts_node.execute(&mut gs);
         assert_eq!(mcts_node.children.len(), 2);
@@ -3322,6 +3381,21 @@ pub mod tests {
     }
     #[test]
     fn test_mcts_start() {
+        // let mut gs = new_gamestate_from_text(
+        //     "
+        // |  |  |  |  |F |  |  |  |  |  |  |
+        // |  |  |  |  |  |SB|  |  |  |  |  |
+        // |  |  |  |  |  |  |  |  |  |  |  |
+        // |  |  |  |  |  |  |  |  |  |  |  |
+        // |  |  |  |  |  |  |  |  |  |  |F |
+        // |  |SA|  |  |  |F |  |  |  |SC|  |
+        // |F |  |  |  |  |  |  |  |  |  |  |
+        // |  |  |  |  |  |  |  |  |  |  |  |
+        // |  |  |  |  |  |  |  |  |  |  |  |
+        // |  |  |  |  |  |SY|  |  |  |  |  |
+        // |  |  |  |  |F |  |  |  |  |  |  |
+        // ",
+        // );
         let mut gs = new_gamestate_from_text(
             "
         |  |  |  |  |F |  |  |  |  |  |  |
@@ -3329,7 +3403,7 @@ pub mod tests {
         |  |  |  |  |  |  |  |  |  |  |  |
         |  |  |  |  |  |  |  |  |  |  |  |
         |  |  |  |  |  |  |  |  |  |  |F |
-        |  |SA|  |  |  |F |  |  |  |SC|  |
+        |  |  |  |  |  |F |  |  |  |  |  |
         |F |  |  |  |  |  |  |  |  |  |  |
         |  |  |  |  |  |  |  |  |  |  |  |
         |  |  |  |  |  |  |  |  |  |  |  |
@@ -3339,16 +3413,10 @@ pub mod tests {
         );
         gs.init();
         let mut mcts = MCTS::new(&gs);
-        // mcts.search_n_iterations(10);
-        mcts.search_until_time_elapsed(425);
-        // let mut best_child_option = Some(&mut mcts.root_node);
-        // while let Some(best_child) = best_child_option {
-        //     debug!(
-        //         "{:?} {:?} {:?}",
-        //         best_child.visits, best_child.score_sum, best_child.moves
-        //     );
-        //     best_child_option = best_child.select(best_child.exploration_constant);
-        // }
+        // mcts.timeout = 1000;
+        mcts.search_n_iterations(50);
+        // mcts.search_until_time_elapsed();
+        debug!("PV: {:?}", mcts.principal_variation(&gs));
         assert_eq!(mcts.root_node.children.len(), 4);
     }
 }
